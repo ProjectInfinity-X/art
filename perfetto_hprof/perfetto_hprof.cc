@@ -257,7 +257,7 @@ class JavaHprofDataSource : public perfetto::DataSource<JavaHprofDataSource> {
       return;
     }
     is_stopped_ = true;
-    async_stop_ = std::move(a.HandleStopAsynchronously());
+    async_stop_ = a.HandleStopAsynchronously();
   }
 
   static art::Thread* art_thread() {
@@ -1146,6 +1146,7 @@ void DumpPerfettoOutOfMemory() REQUIRES_SHARED(art::Locks::mutator_lock_) {
     // child process
     [self](pid_t dumped_pid, uint64_t timestamp) {
       ArmWatchdogOrDie();
+      art::SetThreadName("perfetto_oome_hprof");
       art::ScopedTrace trace("perfetto_hprof oome");
       SetupDataSource("android.java_hprof.oom", true);
       perfetto::Tracing::ActivateTriggers({"com.android.telemetry.art-outofmemory"}, 500);

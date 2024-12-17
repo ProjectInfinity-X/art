@@ -85,7 +85,6 @@
 #include "odr_fs_utils.h"
 #include "odr_metrics.h"
 #include "odrefresh/odrefresh.h"
-#include "selinux/selinux.h"
 #include "tools/cmdline_builder.h"
 
 namespace art {
@@ -101,9 +100,9 @@ using ::android::base::Dirname;
 using ::android::base::Join;
 using ::android::base::ParseInt;
 using ::android::base::Result;
+using ::android::base::ScopeGuard;
 using ::android::base::SetProperty;
 using ::android::base::Split;
-using ::android::base::StartsWith;
 using ::android::base::StringPrintf;
 using ::android::base::Timer;
 using ::android::modules::sdklevel::IsAtLeastU;
@@ -144,75 +143,79 @@ void EraseFiles(const std::vector<std::unique_ptr<File>>& files) {
 //
 // Returns true if all files are moved, false otherwise.
 bool MoveOrEraseFiles(const std::vector<std::unique_ptr<File>>& files,
-                      std::string_view output_directory_path) {
+                      std::string_view output_directory_path,
+                      android::base::function_ref<int(const char*, unsigned int)> restorecon) {
   std::vector<std::unique_ptr<File>> output_files;
   for (auto& file : files) {
     std::string file_basename(Basename(file->GetPath()));
     std::string output_file_path = ART_FORMAT("{}/{}", output_directory_path, file_basename);
     std::string input_file_path = file->GetPath();
 
-    output_files.emplace_back(OS::CreateEmptyFileWriteOnly(output_file_path.c_str()));
-    if (output_files.back() == nullptr) {
-      PLOG(ERROR) << "Failed to open " << QuotePath(output_file_path);
-      output_files.pop_back();
-      EraseFiles(output_files);
-      EraseFiles(files);
-      return false;
-    }
+    if (IsAtLeastV()) {
+      // Simply rename the existing file. Requires at least V as odrefresh does not have
+      // `selinux_android_restorecon` permissions on U and lower.
+      if (!file->Rename(output_file_path)) {
+        PLOG(ERROR) << "Failed to rename " << QuotePath(input_file_path) << " to "
+                    << QuotePath(output_file_path);
+        EraseFiles(files);
+        return false;
+      }
 
-    if (fchmod(output_files.back()->Fd(), kFileMode) != 0) {
-      PLOG(ERROR) << "Could not set file mode on " << QuotePath(output_file_path);
-      EraseFiles(output_files);
-      EraseFiles(files);
-      return false;
-    }
+      if (file->FlushCloseOrErase() != 0) {
+        PLOG(ERROR) << "Failed to flush and close file " << QuotePath(output_file_path);
+        EraseFiles(files);
+        return false;
+      }
 
-    size_t file_bytes = file->GetLength();
-    if (!output_files.back()->Copy(file.get(), /*offset=*/0, file_bytes)) {
-      PLOG(ERROR) << "Failed to copy " << QuotePath(file->GetPath()) << " to "
-                  << QuotePath(output_file_path);
-      EraseFiles(output_files);
-      EraseFiles(files);
-      return false;
-    }
+      if (restorecon(output_file_path.c_str(), 0) < 0) {
+        LOG(ERROR) << "Failed to set security context for file " << QuotePath(output_file_path);
+        EraseFiles(files);
+        return false;
+      }
+    } else {
+      // Create a new file in the output directory, copy the input file's data across, then delete
+      // the input file.
+      output_files.emplace_back(OS::CreateEmptyFileWriteOnly(output_file_path.c_str()));
+      if (output_files.back() == nullptr) {
+        PLOG(ERROR) << "Failed to open " << QuotePath(output_file_path);
+        output_files.pop_back();
+        EraseFiles(output_files);
+        EraseFiles(files);
+        return false;
+      }
 
-    if (!file->Erase(/*unlink=*/true)) {
-      PLOG(ERROR) << "Failed to erase " << QuotePath(file->GetPath());
-      EraseFiles(output_files);
-      EraseFiles(files);
-      return false;
-    }
+      if (fchmod(output_files.back()->Fd(), kFileMode) != 0) {
+        PLOG(ERROR) << "Could not set file mode on " << QuotePath(output_file_path);
+        EraseFiles(output_files);
+        EraseFiles(files);
+        return false;
+      }
 
-    if (output_files.back()->FlushCloseOrErase() != 0) {
-      PLOG(ERROR) << "Failed to flush and close file " << QuotePath(output_file_path);
-      EraseFiles(output_files);
-      EraseFiles(files);
-      return false;
+      size_t file_bytes = file->GetLength();
+      if (!output_files.back()->Copy(file.get(), /*offset=*/0, file_bytes)) {
+        PLOG(ERROR) << "Failed to copy " << QuotePath(file->GetPath()) << " to "
+                    << QuotePath(output_file_path);
+        EraseFiles(output_files);
+        EraseFiles(files);
+        return false;
+      }
+
+      if (!file->Erase(/*unlink=*/true)) {
+        PLOG(ERROR) << "Failed to erase " << QuotePath(file->GetPath());
+        EraseFiles(output_files);
+        EraseFiles(files);
+        return false;
+      }
+
+      if (output_files.back()->FlushCloseOrErase() != 0) {
+        PLOG(ERROR) << "Failed to flush and close file " << QuotePath(output_file_path);
+        EraseFiles(output_files);
+        EraseFiles(files);
+        return false;
+      }
     }
   }
   return true;
-}
-
-Result<std::string> CreateStagingDirectory() {
-  std::string staging_dir = GetArtApexData() + "/staging";
-
-  std::error_code ec;
-  if (std::filesystem::exists(staging_dir, ec)) {
-    if (!std::filesystem::remove_all(staging_dir, ec)) {
-      return Errorf(
-          "Could not remove existing staging directory '{}': {}", staging_dir, ec.message());
-    }
-  }
-
-  if (mkdir(staging_dir.c_str(), S_IRWXU) != 0) {
-    return ErrnoErrorf("Could not create staging directory '{}'", staging_dir);
-  }
-
-  if (setfilecon(staging_dir.c_str(), "u:object_r:apex_art_staging_data_file:s0") != 0) {
-    return ErrnoErrorf("Could not set label on staging directory '{}'", staging_dir);
-  }
-
-  return staging_dir;
 }
 
 // Gets the `ApexInfo` associated with the currently active ART APEX.
@@ -248,9 +251,9 @@ std::vector<art_apex::ModuleInfo> GenerateModuleInfoList(
 
 // Returns a rewritten path based on environment variables for interesting paths.
 std::string RewriteParentDirectoryIfNeeded(const std::string& path) {
-  if (StartsWith(path, "/system/")) {
+  if (path.starts_with("/system/")) {
     return GetAndroidRoot() + path.substr(7);
-  } else if (StartsWith(path, "/system_ext/")) {
+  } else if (path.starts_with("/system_ext/")) {
     return GetSystemExtRoot() + path.substr(11);
   } else {
     return path;
@@ -392,7 +395,7 @@ bool ArtifactsExist(const OdrArtifacts& artifacts,
 
 void AddDex2OatCommonOptions(/*inout*/ CmdlineBuilder& args) {
   args.Add("--android-root=out/empty");
-  args.Add("--abort-on-hard-verifier-error");
+  args.Add("--no-abort-on-hard-verifier-error");
   args.Add("--no-abort-on-soft-verifier-error");
   args.Add("--compilation-reason=boot");
   args.Add("--image-format=lz4");
@@ -489,7 +492,7 @@ Result<void> AddBootClasspathFds(/*inout*/ CmdlineBuilder& args,
     // Special treatment for Compilation OS. JARs in staged APEX may not be visible to Android, and
     // may only be visible in the VM where the staged APEX is mounted. On the contrary, JARs in
     // /system is not available by path in the VM, and can only made available via (remote) FDs.
-    if (StartsWith(jar, "/apex/")) {
+    if (jar.starts_with("/apex/")) {
       bcp_fds.emplace_back("-1");
     } else {
       std::string actual_path = RewriteParentDirectoryIfNeeded(jar);
@@ -679,21 +682,31 @@ int CompilationOptions::CompilationUnitCount() const {
   return count;
 }
 
-OnDeviceRefresh::OnDeviceRefresh(const OdrConfig& config)
+OnDeviceRefresh::OnDeviceRefresh(
+    const OdrConfig& config,
+    android::base::function_ref<int(const char*, const char*)> setfilecon,
+    android::base::function_ref<int(const char*, unsigned int)> restorecon)
     : OnDeviceRefresh(config,
+                      setfilecon,
+                      restorecon,
                       config.GetArtifactDirectory() + "/" + kCacheInfoFile,
                       std::make_unique<ExecUtils>(),
                       CheckCompilationSpace) {}
 
-OnDeviceRefresh::OnDeviceRefresh(const OdrConfig& config,
-                                 const std::string& cache_info_filename,
-                                 std::unique_ptr<ExecUtils> exec_utils,
-                                 android::base::function_ref<bool()> check_compilation_space)
+OnDeviceRefresh::OnDeviceRefresh(
+    const OdrConfig& config,
+    android::base::function_ref<int(const char*, const char*)> setfilecon,
+    android::base::function_ref<int(const char*, unsigned int)> restorecon,
+    const std::string& cache_info_filename,
+    std::unique_ptr<ExecUtils> exec_utils,
+    android::base::function_ref<bool()> check_compilation_space)
     : config_(config),
       cache_info_filename_(cache_info_filename),
       start_time_(time(nullptr)),
       exec_utils_(std::move(exec_utils)),
-      check_compilation_space_(check_compilation_space) {
+      check_compilation_space_(check_compilation_space),
+      setfilecon_(setfilecon),
+      restorecon_(restorecon) {
   // Updatable APEXes should not have DEX files in the DEX2OATBOOTCLASSPATH. At the time of
   // writing i18n is a non-updatable APEX and so does appear in the DEX2OATBOOTCLASSPATH.
   dex2oat_boot_classpath_jars_ = Split(config_.GetDex2oatBootClasspath(), ":");
@@ -720,6 +733,28 @@ time_t OnDeviceRefresh::GetExecutionTimeRemaining() const {
 
 time_t OnDeviceRefresh::GetSubprocessTimeout() const {
   return std::min(GetExecutionTimeRemaining(), kMaxChildProcessSeconds);
+}
+
+Result<std::string> OnDeviceRefresh::CreateStagingDirectory() const {
+  std::string staging_dir = GetArtApexData() + "/staging";
+
+  std::error_code ec;
+  if (std::filesystem::exists(staging_dir, ec)) {
+    if (std::filesystem::remove_all(staging_dir, ec) < 0) {
+      return Errorf(
+          "Could not remove existing staging directory '{}': {}", staging_dir, ec.message());
+    }
+  }
+
+  if (mkdir(staging_dir.c_str(), S_IRWXU) != 0) {
+    return ErrnoErrorf("Could not create staging directory '{}'", staging_dir);
+  }
+
+  if (setfilecon_(staging_dir.c_str(), "u:object_r:apex_art_staging_data_file:s0") != 0) {
+    return ErrnoErrorf("Could not set label on staging directory '{}'", staging_dir);
+  }
+
+  return staging_dir;
 }
 
 std::optional<std::vector<apex::ApexInfo>> OnDeviceRefresh::GetApexInfoList() const {
@@ -767,7 +802,9 @@ Result<art_apex::CacheInfo> OnDeviceRefresh::ReadCacheInfo() const {
   return cache_info.value();
 }
 
-Result<void> OnDeviceRefresh::WriteCacheInfo() const {
+// This function has a large stack frame, so avoid inlining it because doing so
+// could push its caller's stack frame over the limit. See b/330851312.
+NO_INLINE Result<void> OnDeviceRefresh::WriteCacheInfo() const {
   if (OS::FileExists(cache_info_filename_.c_str())) {
     if (unlink(cache_info_filename_.c_str()) != 0) {
       return ErrnoErrorf("Failed to unlink file {}", QuotePath(cache_info_filename_));
@@ -859,7 +896,7 @@ std::vector<std::string> OnDeviceRefresh::GetArtBcpJars() const {
   std::string art_root = GetArtRoot() + "/";
   std::vector<std::string> art_bcp_jars;
   for (const std::string& jar : dex2oat_boot_classpath_jars_) {
-    if (StartsWith(jar, art_root)) {
+    if (jar.starts_with(art_root)) {
       art_bcp_jars.push_back(jar);
     }
   }
@@ -871,7 +908,7 @@ std::vector<std::string> OnDeviceRefresh::GetFrameworkBcpJars() const {
   std::string art_root = GetArtRoot() + "/";
   std::vector<std::string> framework_bcp_jars;
   for (const std::string& jar : dex2oat_boot_classpath_jars_) {
-    if (!StartsWith(jar, art_root)) {
+    if (!jar.starts_with(art_root)) {
       framework_bcp_jars.push_back(jar);
     }
   }
@@ -1060,17 +1097,20 @@ WARN_UNUSED bool OnDeviceRefresh::CheckSystemPropertiesAreDefault() const {
   // `cache-info.xml` exists, we call `CheckSystemPropertiesHaveNotChanged` instead.
   DCHECK(std::none_of(std::begin(kCheckedSystemPropertyPrefixes),
                       std::end(kCheckedSystemPropertyPrefixes),
-                      [](const char* prefix) { return StartsWith(prefix, "persist."); }));
+                      [](std::string_view prefix) { return prefix.starts_with("persist."); }));
 
   const OdrSystemProperties& system_properties = config_.GetSystemProperties();
 
   for (const SystemPropertyConfig& system_property_config : *kSystemProperties.get()) {
-    std::string property = system_properties.GetOrEmpty(system_property_config.name);
-    DCHECK_NE(property, "");
+    // Note that the `kSystemPropertySystemServerCompilerFilterOverride` property has an empty
+    // default value, so we use the `GetOrNull` method and check against nullopt
+    std::optional<std::string> property = system_properties.GetOrNull(system_property_config.name);
+    DCHECK(property.has_value()) << "Property " << system_property_config.name
+                                 << " does not exist in system properties map!";
 
-    if (property != system_property_config.default_value) {
+    if (*property != system_property_config.default_value) {
       LOG(INFO) << "System property " << system_property_config.name << " has a non-default value ("
-                << property << ").";
+                << *property << ").";
       return false;
     }
   }
@@ -1726,21 +1766,6 @@ WARN_UNUSED CompilationResult OnDeviceRefresh::RunDex2oat(
       std::make_pair(artifacts.ImagePath(), artifacts.ImageKind()),
       std::make_pair(artifacts.OatPath(), "oat"),
       std::make_pair(artifacts.VdexPath(), "output-vdex")};
-  std::vector<std::unique_ptr<File>> staging_files;
-  for (const auto& [location, kind] : location_kind_pairs) {
-    std::string staging_location = GetStagingLocation(staging_dir, location);
-    std::unique_ptr<File> staging_file(OS::CreateEmptyFile(staging_location.c_str()));
-    if (staging_file == nullptr) {
-      return CompilationResult::Error(
-          OdrMetrics::Status::kIoError,
-          ART_FORMAT("Failed to create {} file '{}': {}", kind, staging_location, strerror(errno)));
-    }
-    // Don't check the state of the staging file. It doesn't need to be flushed because it's removed
-    // after the compilation regardless of success or failure.
-    staging_file->MarkUnchecked();
-    args.Add(StringPrintf("--%s-fd=%d", kind, staging_file->Fd()));
-    staging_files.emplace_back(std::move(staging_file));
-  }
 
   std::string install_location = Dirname(artifacts.OatPath());
   if (!EnsureDirectoryExists(install_location)) {
@@ -1748,6 +1773,27 @@ WARN_UNUSED CompilationResult OnDeviceRefresh::RunDex2oat(
         OdrMetrics::Status::kIoError,
         ART_FORMAT("Error encountered when preparing directory '{}'", install_location));
   }
+
+  std::vector<std::unique_ptr<File>> output_files;
+  for (const auto& [location, kind] : location_kind_pairs) {
+    std::string output_location =
+        staging_dir.empty() ? location : GetStagingLocation(staging_dir, location);
+    std::unique_ptr<File> output_file(OS::CreateEmptyFile(output_location.c_str()));
+    if (output_file == nullptr) {
+      return CompilationResult::Error(
+          OdrMetrics::Status::kIoError,
+          ART_FORMAT("Failed to create {} file '{}': {}", kind, output_location, strerror(errno)));
+    }
+    args.Add(StringPrintf("--%s-fd=%d", kind, output_file->Fd()));
+    output_files.emplace_back(std::move(output_file));
+  }
+
+  // We don't care about file state on failure.
+  auto cleanup = ScopeGuard([&] {
+    for (const std::unique_ptr<File>& file : output_files) {
+      file->MarkUnchecked();
+    }
+  });
 
   args.Concat(std::move(extra_args));
 
@@ -1772,12 +1818,29 @@ WARN_UNUSED CompilationResult OnDeviceRefresh::RunDex2oat(
         dex2oat_result);
   }
 
-  if (!MoveOrEraseFiles(staging_files, install_location)) {
-    return CompilationResult::Error(
-        OdrMetrics::Status::kIoError,
-        ART_FORMAT("Failed to commit artifacts to '{}'", install_location));
+  if (staging_dir.empty()) {
+    for (const std::unique_ptr<File>& file : output_files) {
+      if (file->FlushCloseOrErase() != 0) {
+        return CompilationResult::Error(
+            OdrMetrics::Status::kIoError,
+            ART_FORMAT("Failed to flush close file '{}'", file->GetPath()));
+      }
+    }
+  } else {
+    for (const std::unique_ptr<File>& file : output_files) {
+      if (file->Flush() != 0) {
+        return CompilationResult::Error(OdrMetrics::Status::kIoError,
+                                        ART_FORMAT("Failed to flush file '{}'", file->GetPath()));
+      }
+    }
+    if (!MoveOrEraseFiles(output_files, install_location, restorecon_)) {
+      return CompilationResult::Error(
+          OdrMetrics::Status::kIoError,
+          ART_FORMAT("Failed to commit artifacts to '{}'", install_location));
+    }
   }
 
+  cleanup.Disable();
   return CompilationResult::Dex2oatOk(timer.duration().count(), dex2oat_result);
 }
 
@@ -1817,22 +1880,24 @@ OnDeviceRefresh::RunDex2oatForBootClasspath(const std::string& staging_dir,
 
     args.Add(StringPrintf("--base=0x%08x", ART_BASE_ADDRESS));
 
-    std::string dirty_image_objects_file(GetAndroidRoot() + "/etc/dirty-image-objects");
-    std::unique_ptr<File> file(OS::OpenFileForReading(dirty_image_objects_file.c_str()));
-    if (file != nullptr) {
-      args.Add("--dirty-image-objects-fd=%d", file->Fd());
-      readonly_files_raii.push_back(std::move(file));
-    } else if (errno == ENOENT) {
-      LOG(WARNING) << ART_FORMAT("Missing dirty objects file '{}'", dirty_image_objects_file);
-    } else {
-      return CompilationResult::Error(OdrMetrics::Status::kIoError,
-                                      ART_FORMAT("Failed to open dirty objects file '{}': {}",
-                                                 dirty_image_objects_file,
-                                                 strerror(errno)));
+    for (const std::string& prefix : {GetAndroidRoot(), GetArtRoot()}) {
+      std::string dirty_image_objects_file = prefix + "/etc/dirty-image-objects";
+      std::unique_ptr<File> file(OS::OpenFileForReading(dirty_image_objects_file.c_str()));
+      if (file != nullptr) {
+        args.Add("--dirty-image-objects-fd=%d", file->Fd());
+        readonly_files_raii.push_back(std::move(file));
+      } else if (errno == ENOENT) {
+        LOG(WARNING) << ART_FORMAT("Missing dirty objects file '{}'", dirty_image_objects_file);
+      } else {
+        return CompilationResult::Error(OdrMetrics::Status::kIoError,
+                                        ART_FORMAT("Failed to open dirty objects file '{}': {}",
+                                                   dirty_image_objects_file,
+                                                   strerror(errno)));
+      }
     }
 
     std::string preloaded_classes_file(GetAndroidRoot() + "/etc/preloaded-classes");
-    file.reset(OS::OpenFileForReading(preloaded_classes_file.c_str()));
+    std::unique_ptr<File> file(OS::OpenFileForReading(preloaded_classes_file.c_str()));
     if (file != nullptr) {
       args.Add("--preloaded-classes-fds=%d", file->Fd());
       readonly_files_raii.push_back(std::move(file));
@@ -2103,8 +2168,10 @@ WARN_UNUSED ExitCode OnDeviceRefresh::Compile(OdrMetrics& metrics,
     return ExitCode::kCleanupFailed;
   }
 
-  if (!config_.GetStagingDir().empty()) {
-    staging_dir = config_.GetStagingDir();
+  if (config_.GetCompilationOsMode()) {
+    // We don't need to stage files in CompOS. If the compilation fails (partially or entirely),
+    // CompOS will not sign any artifacts, and odsign will discard CompOS outputs entirely.
+    staging_dir = "";
   } else {
     // Create staging area and assign label for generating compilation artifacts.
     Result<std::string> res = CreateStagingDirectory();
@@ -2115,8 +2182,6 @@ WARN_UNUSED ExitCode OnDeviceRefresh::Compile(OdrMetrics& metrics,
     }
     staging_dir = res.value();
   }
-
-  std::string error_msg;
 
   uint32_t dex2oat_invocation_count = 0;
   uint32_t total_dex2oat_invocation_count = compilation_options.CompilationUnitCount();
@@ -2150,7 +2215,8 @@ WARN_UNUSED ExitCode OnDeviceRefresh::Compile(OdrMetrics& metrics,
   }
 
   // Don't compile system server if the compilation of BCP failed.
-  if (!system_server_isa_failed && !compilation_options.system_server_jars_to_compile.empty()) {
+  if (!system_server_isa_failed && !compilation_options.system_server_jars_to_compile.empty() &&
+      !config_.GetOnlyBootImages()) {
     OdrMetrics::Stage stage = OdrMetrics::Stage::kSystemServerClasspath;
     CompilationResult ss_result = CompileSystemServer(
         staging_dir, compilation_options.system_server_jars_to_compile, advance_animation_progress);

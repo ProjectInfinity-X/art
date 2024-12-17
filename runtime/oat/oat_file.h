@@ -41,6 +41,7 @@
 namespace art HIDDEN {
 
 class BitVector;
+class ClassLinker;
 class ClassLoaderContext;
 class ElfFile;
 class DexLayoutSections;
@@ -74,7 +75,7 @@ enum class OatClassType : uint8_t {
   kAllCompiled = 0,   // OatClass is followed by an OatMethodOffsets for each method.
   kSomeCompiled = 1,  // A bitmap of OatMethodOffsets that are present follows the OatClass.
   kNoneCompiled = 2,  // All methods are interpreted so no OatMethodOffsets are necessary.
-  kOatClassMax = 3,
+  kLast = kNoneCompiled
 };
 
 EXPORT std::ostream& operator<<(std::ostream& os, OatClassType rhs);
@@ -179,6 +180,12 @@ class OatFile {
                                const std::string& location,
                                ClassLoaderContext* context,
                                std::string* error_msg);
+
+  // Set the start of the app image.
+  // Needed for initializing app image relocations in the .data.img.rel.ro section.
+  void SetAppImageBegin(uint8_t* app_image_begin) const {
+    app_image_begin_ = app_image_begin;
+  }
 
   // Return whether the `OatFile` uses a vdex-only file.
   bool IsBackedByVdexOnly() const;
@@ -299,7 +306,8 @@ class OatFile {
     const uint32_t* const bitmap_;
     const OatMethodOffsets* const methods_pointer_;
 
-    friend class art::OatDexFile;
+    friend class ClassLinker;
+    friend class OatDexFile;
   };
 
   // Get the OatDexFile for the given dex_location within this oat file.
@@ -323,8 +331,12 @@ class OatFile {
     return p >= Begin() && p < End();
   }
 
-  size_t DataBimgRelRoSize() const {
-    return DataBimgRelRoEnd() - DataBimgRelRoBegin();
+  size_t DataImgRelRoSize() const {
+    return DataImgRelRoEnd() - DataImgRelRoBegin();
+  }
+
+  size_t DataImgRelRoAppImageOffset() const {
+    return DataImgRelRoAppImage() - DataImgRelRoBegin();
   }
 
   size_t BssSize() const {
@@ -349,11 +361,16 @@ class OatFile {
     return DexEnd() - DexBegin();
   }
 
+  // Returns the base address of the ELF file, or nullptr if the oat file is not backed by an ELF
+  // file or an error occurred.
+  virtual const uint8_t* ComputeElfBegin(std::string* error_msg) const = 0;
+
   EXPORT const uint8_t* Begin() const;
   EXPORT const uint8_t* End() const;
 
-  const uint8_t* DataBimgRelRoBegin() const { return data_bimg_rel_ro_begin_; }
-  const uint8_t* DataBimgRelRoEnd() const { return data_bimg_rel_ro_end_; }
+  const uint8_t* DataImgRelRoBegin() const { return data_img_rel_ro_begin_; }
+  const uint8_t* DataImgRelRoEnd() const { return data_img_rel_ro_end_; }
+  const uint8_t* DataImgRelRoAppImage() const { return data_img_rel_ro_app_image_; }
 
   const uint8_t* BssBegin() const { return bss_begin_; }
   const uint8_t* BssEnd() const { return bss_end_; }
@@ -365,10 +382,11 @@ class OatFile {
   EXPORT const uint8_t* DexEnd() const;
 
   EXPORT ArrayRef<const uint32_t> GetBootImageRelocations() const;
+  EXPORT ArrayRef<const uint32_t> GetAppImageRelocations() const;
   EXPORT ArrayRef<ArtMethod*> GetBssMethods() const;
   EXPORT ArrayRef<GcRoot<mirror::Object>> GetBssGcRoots() const;
 
-  // Initialize relocation sections (.data.bimg.rel.ro and .bss).
+  // Initialize relocation sections (.data.img.rel.ro and .bss).
   void InitializeRelocations() const;
 
   // Finds the associated oat class for a dex_file and descriptor. Returns an invalid OatClass on
@@ -421,11 +439,15 @@ class OatFile {
   // Pointer to end of oat region for bounds checking.
   const uint8_t* end_;
 
-  // Pointer to the .data.bimg.rel.ro section, if present, otherwise null.
-  const uint8_t* data_bimg_rel_ro_begin_;
+  // Pointer to the .data.img.rel.ro section, if present, otherwise null.
+  const uint8_t* data_img_rel_ro_begin_;
 
-  // Pointer to the end of the .data.bimg.rel.ro section, if present, otherwise null.
-  const uint8_t* data_bimg_rel_ro_end_;
+  // Pointer to the end of the .data.img.rel.ro section, if present, otherwise null.
+  const uint8_t* data_img_rel_ro_end_;
+
+  // Pointer to the beginning of the app image relocations in the .data.img.rel.ro section,
+  // if present, otherwise null.
+  const uint8_t* data_img_rel_ro_app_image_;
 
   // Pointer to the .bss section, if present, otherwise null.
   uint8_t* bss_begin_;
@@ -433,10 +455,10 @@ class OatFile {
   // Pointer to the end of the .bss section, if present, otherwise null.
   uint8_t* bss_end_;
 
-  // Pointer to the beginning of the ArtMethod*s in .bss section, if present, otherwise null.
+  // Pointer to the beginning of the ArtMethod*s in the .bss section, if present, otherwise null.
   uint8_t* bss_methods_;
 
-  // Pointer to the beginning of the GC roots in .bss section, if present, otherwise null.
+  // Pointer to the beginning of the GC roots in the .bss section, if present, otherwise null.
   uint8_t* bss_roots_;
 
   // Was this oat_file loaded executable?
@@ -447,6 +469,9 @@ class OatFile {
 
   // Pointer to the end of the .vdex section, if present, otherwise null.
   uint8_t* vdex_end_;
+
+  // Pointer to the beginning of the app image, if any.
+  mutable uint8_t* app_image_begin_;
 
   // Owning storage for the OatDexFile objects.
   std::vector<const OatDexFile*> oat_dex_files_storage_;
@@ -553,27 +578,27 @@ class OatDexFile final {
   }
 
   const IndexBssMapping* GetMethodBssMapping() const {
-    return method_bss_mapping_;
+    return bss_mapping_info_.method_bss_mapping;
   }
 
   const IndexBssMapping* GetTypeBssMapping() const {
-    return type_bss_mapping_;
+    return bss_mapping_info_.type_bss_mapping;
   }
 
   const IndexBssMapping* GetPublicTypeBssMapping() const {
-    return public_type_bss_mapping_;
+    return bss_mapping_info_.public_type_bss_mapping;
   }
 
   const IndexBssMapping* GetPackageTypeBssMapping() const {
-    return package_type_bss_mapping_;
+    return bss_mapping_info_.package_type_bss_mapping;
   }
 
   const IndexBssMapping* GetStringBssMapping() const {
-    return string_bss_mapping_;
+    return bss_mapping_info_.string_bss_mapping;
   }
 
   const IndexBssMapping* GetMethodTypeBssMapping() const {
-    return method_type_bss_mapping_;
+    return bss_mapping_info_.method_type_bss_mapping;
   }
 
   const uint8_t* GetDexFilePointer() const {
@@ -583,7 +608,7 @@ class OatDexFile final {
   // Looks up a class definition by its class descriptor. Hash must be
   // ComputeModifiedUtf8Hash(descriptor).
   EXPORT static const dex::ClassDef* FindClassDef(const DexFile& dex_file,
-                                                  const char* descriptor,
+                                                  std::string_view descriptor,
                                                   size_t hash);
 
   const TypeLookupTable& GetTypeLookupTable() const {
@@ -610,12 +635,7 @@ class OatDexFile final {
              const std::shared_ptr<DexFileContainer>& dex_file_container_,
              const uint8_t* dex_file_pointer,
              const uint8_t* lookup_table_data,
-             const IndexBssMapping* method_bss_mapping,
-             const IndexBssMapping* type_bss_mapping,
-             const IndexBssMapping* public_type_bss_mapping,
-             const IndexBssMapping* package_type_bss_mapping,
-             const IndexBssMapping* string_bss_mapping,
-             const IndexBssMapping* method_type_bss_mapping,
+             const OatFile::BssMappingInfo& bss_mapping_info,
              const uint32_t* oat_class_offsets_pointer,
              const DexLayoutSections* dex_layout_sections);
 
@@ -645,12 +665,7 @@ class OatDexFile final {
   const std::shared_ptr<DexFileContainer> dex_file_container_;
   const uint8_t* const dex_file_pointer_ = nullptr;
   const uint8_t* const lookup_table_data_ = nullptr;
-  const IndexBssMapping* const method_bss_mapping_ = nullptr;
-  const IndexBssMapping* const type_bss_mapping_ = nullptr;
-  const IndexBssMapping* const public_type_bss_mapping_ = nullptr;
-  const IndexBssMapping* const package_type_bss_mapping_ = nullptr;
-  const IndexBssMapping* const string_bss_mapping_ = nullptr;
-  const IndexBssMapping* const method_type_bss_mapping_ = nullptr;
+  const OatFile::BssMappingInfo bss_mapping_info_;
   const uint32_t* const oat_class_offsets_pointer_ = nullptr;
   TypeLookupTable lookup_table_;
   const DexLayoutSections* const dex_layout_sections_ = nullptr;

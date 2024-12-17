@@ -535,9 +535,7 @@ void IntrinsicLocationsBuilderARMVIXL::VisitStringCompareTo(HInvoke* invoke) {
                                        kIntrinsified);
   locations->SetInAt(0, Location::RequiresRegister());
   locations->SetInAt(1, Location::RequiresRegister());
-  locations->AddTemp(Location::RequiresRegister());
-  locations->AddTemp(Location::RequiresRegister());
-  locations->AddTemp(Location::RequiresRegister());
+  locations->AddRegisterTemps(3);
   // Need temporary registers for String compression's feature.
   if (mirror::kUseStringCompression) {
     locations->AddTemp(Location::RequiresRegister());
@@ -838,7 +836,7 @@ static const char* GetConstString(HInstruction* candidate, uint32_t* utf16_lengt
   if (candidate->IsLoadString()) {
     HLoadString* load_string = candidate->AsLoadString();
     const DexFile& dex_file = load_string->GetDexFile();
-    return dex_file.StringDataAndUtf16LengthByIdx(load_string->GetStringIndex(), utf16_length);
+    return dex_file.GetStringDataAndUtf16Length(load_string->GetStringIndex(), utf16_length);
   }
   return nullptr;
 }
@@ -2120,9 +2118,7 @@ void IntrinsicLocationsBuilderARMVIXL::VisitStringGetCharsNoCheck(HInvoke* invok
   locations->SetInAt(4, Location::RequiresRegister());
 
   // Temporary registers to store lengths of strings and for calculations.
-  locations->AddTemp(Location::RequiresRegister());
-  locations->AddTemp(Location::RequiresRegister());
-  locations->AddTemp(Location::RequiresRegister());
+  locations->AddRegisterTemps(3);
 }
 
 void IntrinsicCodeGeneratorARMVIXL::VisitStringGetCharsNoCheck(HInvoke* invoke) {
@@ -2305,27 +2301,25 @@ void IntrinsicCodeGeneratorARMVIXL::VisitMathFloor(HInvoke* invoke) {
   __ Vrintm(F64, OutputDRegister(invoke), InputDRegisterAt(invoke, 0));
 }
 
-#define VISIT_INTRINSIC(name, low, high, type, start_index) \
-  void IntrinsicLocationsBuilderARMVIXL::Visit ##name ##ValueOf(HInvoke* invoke) { \
-    InvokeRuntimeCallingConventionARMVIXL calling_convention; \
-    IntrinsicVisitor::ComputeValueOfLocations( \
-        invoke, \
-        codegen_, \
-        low, \
-        high - low + 1, \
-        LocationFrom(r0), \
-        LocationFrom(calling_convention.GetRegisterAt(0))); \
-  } \
-  void IntrinsicCodeGeneratorARMVIXL::Visit ##name ##ValueOf(HInvoke* invoke) { \
-    IntrinsicVisitor::ValueOfInfo info = \
-        IntrinsicVisitor::ComputeValueOfInfo( \
-            invoke, \
-            codegen_->GetCompilerOptions(), \
-            WellKnownClasses::java_lang_ ##name ##_value, \
-            low, \
-            high - low + 1, \
-            start_index); \
-    HandleValueOf(invoke, info, type); \
+#define VISIT_INTRINSIC(name, low, high, type, start_index)                                       \
+  void IntrinsicLocationsBuilderARMVIXL::Visit##name##ValueOf(HInvoke* invoke) {                  \
+    InvokeRuntimeCallingConventionARMVIXL calling_convention;                                     \
+    IntrinsicVisitor::ComputeValueOfLocations(invoke,                                             \
+                                              codegen_,                                           \
+                                              low,                                                \
+                                              (high) - (low) + 1,                                 \
+                                              LocationFrom(r0),                                   \
+                                              LocationFrom(calling_convention.GetRegisterAt(0))); \
+  }                                                                                               \
+  void IntrinsicCodeGeneratorARMVIXL::Visit##name##ValueOf(HInvoke* invoke) {                     \
+    IntrinsicVisitor::ValueOfInfo info =                                                          \
+        IntrinsicVisitor::ComputeValueOfInfo(invoke,                                              \
+                                             codegen_->GetCompilerOptions(),                      \
+                                             WellKnownClasses::java_lang_##name##_value,          \
+                                             low,                                                 \
+                                             (high) - (low) + 1,                                  \
+                                             start_index);                                        \
+    HandleValueOf(invoke, info, type);                                                            \
   }
   BOXED_TYPES(VISIT_INTRINSIC)
 #undef VISIT_INTRINSIC
@@ -4218,7 +4212,7 @@ static void GenerateVarHandleInstanceFieldChecks(HInvoke* invoke,
     __ B(eq, slow_path->GetEntryLabel());
   }
 
-  if (!optimizations.GetUseKnownBootImageVarHandle()) {
+  if (!optimizations.GetUseKnownImageVarHandle()) {
     // Use the first temporary register, whether it's for the declaring class or the offset.
     // It is not used yet at this point.
     vixl32::Register temp = RegisterFrom(invoke->GetLocations()->GetTemp(0u));
@@ -4351,7 +4345,7 @@ static VarHandleSlowPathARMVIXL* GenerateVarHandleChecks(HInvoke* invoke,
                                                          DataType::Type type) {
   size_t expected_coordinates_count = GetExpectedVarHandleCoordinatesCount(invoke);
   VarHandleOptimizations optimizations(invoke);
-  if (optimizations.GetUseKnownBootImageVarHandle()) {
+  if (optimizations.GetUseKnownImageVarHandle()) {
     DCHECK_NE(expected_coordinates_count, 2u);
     if (expected_coordinates_count == 0u || optimizations.GetSkipObjectNullCheck()) {
       return nullptr;
@@ -4362,7 +4356,7 @@ static VarHandleSlowPathARMVIXL* GenerateVarHandleChecks(HInvoke* invoke,
       new (codegen->GetScopedAllocator()) VarHandleSlowPathARMVIXL(invoke, order);
   codegen->AddSlowPath(slow_path);
 
-  if (!optimizations.GetUseKnownBootImageVarHandle()) {
+  if (!optimizations.GetUseKnownImageVarHandle()) {
     GenerateVarHandleAccessModeAndVarTypeChecks(invoke, codegen, slow_path, type);
   }
   GenerateVarHandleCoordinateChecks(invoke, codegen, slow_path);
@@ -4397,7 +4391,7 @@ static void GenerateVarHandleTarget(HInvoke* invoke,
   size_t expected_coordinates_count = GetExpectedVarHandleCoordinatesCount(invoke);
 
   if (expected_coordinates_count <= 1u) {
-    if (VarHandleOptimizations(invoke).GetUseKnownBootImageVarHandle()) {
+    if (VarHandleOptimizations(invoke).GetUseKnownImageVarHandle()) {
       ScopedObjectAccess soa(Thread::Current());
       ArtField* target_field = GetBootImageVarHandleField(invoke);
       if (expected_coordinates_count == 0u) {

@@ -23,6 +23,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "base/os.h"
@@ -72,6 +73,15 @@ class DexFileLoader {
   // index == 0, and dex_location + multi-dex-separator + GetMultiDexClassesDexName(index) else.
   static std::string GetMultiDexLocation(size_t index, const char* dex_location);
 
+  // Returns the multidex location and the checksum for each dex file in a zip or a dex container.
+  //
+  // This uses the source path provided to DexFileLoader constructor.
+  //
+  // Returns false on error.
+  bool GetMultiDexChecksums(/*out*/ std::vector<std::pair<std::string, uint32_t>>* checksums,
+                            /*out*/ std::string* error_msg,
+                            /*out*/ bool* only_contains_uncompressed_dex = nullptr);
+
   // Returns combined checksum of one or more dex files (one checksum for the whole multidex set).
   //
   // This uses the source path provided to DexFileLoader constructor.
@@ -94,7 +104,7 @@ class DexFileLoader {
     std::optional<uint32_t> checksum;
     for (; *i < dex_files.size(); ++(*i)) {
       const auto* dex_file = &*dex_files[*i];
-      bool is_primary_dex = !IsMultiDexLocation(dex_file->GetLocation().c_str());
+      bool is_primary_dex = !IsMultiDexLocation(dex_file->GetLocation());
       if (!checksum.has_value()) {                         // First dex file.
         CHECK(is_primary_dex) << dex_file->GetLocation();  // Expect primary dex.
       } else if (is_primary_dex) {                         // Later dex file.

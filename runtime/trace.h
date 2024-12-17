@@ -32,6 +32,7 @@
 #include "base/mutex.h"
 #include "base/os.h"
 #include "base/safe_map.h"
+#include "class_linker.h"
 #include "instrumentation.h"
 #include "runtime_globals.h"
 #include "thread_pool.h"
@@ -123,6 +124,56 @@ static constexpr int32_t kHighTimestampOffsetInBytes =
 
 static constexpr uintptr_t kMaskTraceAction = ~0b11;
 
+// Packet type encoding for the new method tracing format.
+static constexpr int kThreadInfoHeaderV2 = 0;
+static constexpr int kMethodInfoHeaderV2 = 1;
+static constexpr int kEntryHeaderV2 = 2;
+static constexpr int kSummaryHeaderV2 = 3;
+
+// Packet sizes for the new method tracing format.
+static constexpr uint16_t kTraceHeaderLengthV2 = 32;
+static constexpr uint16_t kTraceRecordSizeSingleClockV2 = 6;
+static constexpr uint16_t kTraceRecordSizeDualClockV2 = kTraceRecordSizeSingleClockV2 + 2;
+static constexpr uint16_t kEntryHeaderSizeV2 = 12;
+
+static constexpr uint16_t kTraceVersionSingleClockV2 = 4;
+static constexpr uint16_t kTraceVersionDualClockV2 = 5;
+
+// TODO(mythria): Consider adding checks to guard agaist OOB access for Append*LE methods.
+// Currently the onus is on the callers to ensure there is sufficient space in the buffer.
+// TODO: put this somewhere with the big-endian equivalent used by JDWP.
+static inline void Append2LE(uint8_t* buf, uint16_t val) {
+  *buf++ = static_cast<uint8_t>(val);
+  *buf++ = static_cast<uint8_t>(val >> 8);
+}
+
+// TODO: put this somewhere with the big-endian equivalent used by JDWP.
+static inline void Append3LE(uint8_t* buf, uint16_t val) {
+  *buf++ = static_cast<uint8_t>(val);
+  *buf++ = static_cast<uint8_t>(val >> 8);
+  *buf++ = static_cast<uint8_t>(val >> 16);
+}
+
+// TODO: put this somewhere with the big-endian equivalent used by JDWP.
+static inline void Append4LE(uint8_t* buf, uint32_t val) {
+  *buf++ = static_cast<uint8_t>(val);
+  *buf++ = static_cast<uint8_t>(val >> 8);
+  *buf++ = static_cast<uint8_t>(val >> 16);
+  *buf++ = static_cast<uint8_t>(val >> 24);
+}
+
+// TODO: put this somewhere with the big-endian equivalent used by JDWP.
+static inline void Append8LE(uint8_t* buf, uint64_t val) {
+  *buf++ = static_cast<uint8_t>(val);
+  *buf++ = static_cast<uint8_t>(val >> 8);
+  *buf++ = static_cast<uint8_t>(val >> 16);
+  *buf++ = static_cast<uint8_t>(val >> 24);
+  *buf++ = static_cast<uint8_t>(val >> 32);
+  *buf++ = static_cast<uint8_t>(val >> 40);
+  *buf++ = static_cast<uint8_t>(val >> 48);
+  *buf++ = static_cast<uint8_t>(val >> 56);
+}
+
 class TraceWriterThreadPool : public ThreadPool {
  public:
   static TraceWriterThreadPool* Create(const char* name) {
@@ -157,7 +208,7 @@ class TraceWriter {
   // when the method is seen for the first time in the recoreded events. So we need to serialize
   // these flushes across threads.
   void FlushBuffer(Thread* thread, bool is_sync, bool free_buffer)
-      REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!tracing_lock_);
+      REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!trace_writer_lock_);
 
   // This is called when the per-thread buffer is full and a new entry needs to be recorded. This
   // returns a pointer to the new buffer where the entries should be recorded.
@@ -169,16 +220,21 @@ class TraceWriter {
   // synchronously and reuse the existing buffer. Since this mode is mostly deprecated we want to
   // keep the implementation simple here.
   uintptr_t* PrepareBufferForNewEntries(Thread* thread) REQUIRES_SHARED(Locks::mutator_lock_)
-      REQUIRES(!tracing_lock_);
+      REQUIRES(!trace_writer_lock_);
 
+  // Creates a summary packet which includes some meta information like number of events, clock
+  // overhead, trace version in human readable form. This is used to dump the summary at the end
+  // of tracing..
+  std::string CreateSummary(int flags) REQUIRES(!trace_writer_lock_)
+      REQUIRES_SHARED(Locks::mutator_lock_);
   // Flushes all per-thread buffer and also write a summary entry.
-  void FinishTracing(int flags, bool flush_entries) REQUIRES(!tracing_lock_)
+  void FinishTracing(int flags, bool flush_entries) REQUIRES(!trace_writer_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   void PreProcessTraceForMethodInfos(uintptr_t* buffer,
                                      size_t num_entries,
                                      std::unordered_map<ArtMethod*, std::string>& method_infos)
-      REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!tracing_lock_);
+      REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!trace_writer_lock_);
 
   // Flush buffer to the file (for streaming) or to the common buffer (for non-streaming). In
   // non-streaming case it returns false if all the contents couldn't be flushed.
@@ -186,11 +242,20 @@ class TraceWriter {
                    size_t num_entries,
                    size_t tid,
                    const std::unordered_map<ArtMethod*, std::string>& method_infos)
-      REQUIRES(!tracing_lock_);
+      REQUIRES(!trace_writer_lock_);
 
   // This is called when we see the first entry from the thread to record the information about the
   // thread.
-  void RecordThreadInfo(Thread* thread) REQUIRES(!tracing_lock_);
+  void RecordThreadInfo(Thread* thread) REQUIRES(!trace_writer_lock_);
+
+  // Records information about all methods in the newly loaded class in the buffer. If the buffer
+  // doesn't have enough space to record the entry, then it adds a task to flush the buffer
+  // contents and uses a new buffer to record the information.
+  // buffer is the pointer to buffer that is used to record method info and the offset is the
+  // offset in the buffer to start recording method info. If *buffer is nullptr then a new one is
+  // allocated and buffer is updated to point to the newly allocated one.
+  void RecordMethodInfoV2(mirror::Class* klass, uint8_t** buffer, size_t* offset)
+      REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!trace_writer_lock_);
 
   bool HasOverflow() { return overflow_; }
   TraceOutputMode GetOutputMode() { return trace_output_mode_; }
@@ -200,17 +265,39 @@ class TraceWriter {
   // as the owner tid. This also allocates the buffer pool.
   void InitializeTraceBuffers();
 
-  // Releases the trace buffer and transfers the ownership to the specified tid. If the tid is 0,
-  // then it means it is free and other threads can claim it.
-  void FetchTraceBufferForThread(int index, size_t tid);
+  // Releases the trace buffer and signals any waiting threads about a free buffer.
+  void ReleaseBuffer(int index);
+
+  // Release the trace buffer of the thread. This is called to release the buffer without flushing
+  // the entries. See a comment in ThreadList::Unregister for more detailed explanation.
+  void ReleaseBufferForThread(Thread* self);
 
   // Tries to find a free buffer (which has owner of 0) from the pool. If there are no free buffers
-  // it fetches a task, flushes the contents of the buffer and returns that buffer.
-  uintptr_t* AcquireTraceBuffer(size_t tid);
+  // then it just waits for a free buffer. To prevent any deadlocks, we only wait if the number of
+  // pending tasks are greater than the number of waiting threads. Allocates a new buffer if it
+  // isn't safe to wait.
+  uintptr_t* AcquireTraceBuffer(size_t tid) REQUIRES_SHARED(Locks::mutator_lock_)
+      REQUIRES(!trace_writer_lock_);
 
   // Returns the index corresponding to the start of the current_buffer. We allocate one large
   // buffer and assign parts of it for each thread.
   int GetMethodTraceIndex(uintptr_t* current_buffer);
+
+  int GetTraceFormatVersion() { return trace_format_version_; }
+
+  // Ensures that there are no threads suspended waiting for a free buffer. It signals threads
+  // waiting for a free buffer and waits for all the threads to respond to the signal.
+  void StopTracing();
+
+  // Adds a task to write method info to the file. The buffer is already in the
+  // right format and it just adds a new task which takes the ownership of the
+  // buffer and returns a new buffer that can be used. If release is set to true
+  // then it doesn't fetch a new buffer.
+  uint8_t* AddMethodInfoWriteTask(uint8_t* buffer, size_t offset, size_t tid, bool release)
+      REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!trace_writer_lock_);
+
+  // Writes buffer contents to the file.
+  void WriteToFile(uint8_t* buffer, size_t offset);
 
  private:
   void ReadValuesFromRecord(uintptr_t* method_trace_entries,
@@ -221,26 +308,25 @@ class TraceWriter {
 
   void FlushEntriesFormatV2(uintptr_t* method_trace_entries,
                             size_t tid,
-                            const std::unordered_map<ArtMethod*, std::string>& method_infos,
                             size_t num_records,
                             size_t* current_index,
-                            uint8_t* init_buffer_ptr) REQUIRES(tracing_lock_);
+                            uint8_t* init_buffer_ptr) REQUIRES(trace_writer_lock_);
 
   void FlushEntriesFormatV1(uintptr_t* method_trace_entries,
                             size_t tid,
                             const std::unordered_map<ArtMethod*, std::string>& method_infos,
                             size_t end_offset,
                             size_t* current_index,
-                            uint8_t* buffer_ptr) REQUIRES(tracing_lock_);
+                            uint8_t* buffer_ptr) REQUIRES(trace_writer_lock_);
   // Get a 32-bit id for the method and specify if the method hasn't been seen before. If this is
   // the first time we see this method record information (like method name, declaring class etc.,)
   // about the method.
-  std::pair<uint32_t, bool> GetMethodEncoding(ArtMethod* method) REQUIRES(tracing_lock_);
-  bool HasMethodEncoding(ArtMethod* method) REQUIRES(tracing_lock_);
+  std::pair<uint32_t, bool> GetMethodEncoding(ArtMethod* method) REQUIRES(trace_writer_lock_);
+  bool HasMethodEncoding(ArtMethod* method) REQUIRES(trace_writer_lock_);
 
   // Get a 16-bit id for the thread. We don't want to use thread ids directly since they can be
   // more than 16-bit.
-  uint16_t GetThreadEncoding(pid_t thread_id) REQUIRES(tracing_lock_);
+  uint16_t GetThreadEncoding(pid_t thread_id) REQUIRES(trace_writer_lock_);
 
   // Get the information about the method.
   std::string GetMethodLine(const std::string& method_line, uint32_t method_id);
@@ -249,7 +335,8 @@ class TraceWriter {
   // Helper function to record method information when processing the events. These are used by
   // streaming output mode. Non-streaming modes dump the methods and threads list at the end of
   // tracing.
-  void RecordMethodInfo(const std::string& method_line, uint32_t method_id) REQUIRES(tracing_lock_);
+  void RecordMethodInfoV1(const std::string& method_line, uint64_t method_id)
+      REQUIRES(trace_writer_lock_);
 
   // Encodes the trace event. This assumes that there is enough space reserved to encode the entry.
   void EncodeEventEntry(uint8_t* ptr,
@@ -257,16 +344,12 @@ class TraceWriter {
                         uint32_t method_index,
                         TraceAction action,
                         uint32_t thread_clock_diff,
-                        uint32_t wall_clock_diff) REQUIRES(tracing_lock_);
+                        uint32_t wall_clock_diff) REQUIRES(trace_writer_lock_);
 
   // Encodes the header for the events block. This assumes that there is enough space reserved to
   // encode the entry.
-  void EncodeEventBlockHeader(uint8_t* ptr,
-                              uint32_t thread_id,
-                              uint32_t method_index,
-                              uint32_t init_thread_clock_time,
-                              uint32_t init_wall_clock_time,
-                              uint16_t num_records) REQUIRES(tracing_lock_);
+  void EncodeEventBlockHeader(uint8_t* ptr, uint32_t thread_id, uint32_t num_records)
+      REQUIRES(trace_writer_lock_);
 
   // Ensures there is sufficient space in the buffer to record the requested_size. If there is not
   // enough sufficient space the current contents of the buffer are written to the file and
@@ -278,13 +361,13 @@ class TraceWriter {
                    size_t required_size);
 
   // Flush tracing buffers from all the threads.
-  void FlushAllThreadBuffers() REQUIRES(!Locks::thread_list_lock_) REQUIRES(!tracing_lock_);
+  void FlushAllThreadBuffers() REQUIRES(!Locks::thread_list_lock_) REQUIRES(!trace_writer_lock_);
 
 
   // Methods to output traced methods and threads.
   void DumpMethodList(std::ostream& os) REQUIRES_SHARED(Locks::mutator_lock_)
-      REQUIRES(!tracing_lock_);
-  void DumpThreadList(std::ostream& os) REQUIRES(!Locks::thread_list_lock_, !tracing_lock_);
+      REQUIRES(!trace_writer_lock_);
+  void DumpThreadList(std::ostream& os) REQUIRES(!Locks::thread_list_lock_, !trace_writer_lock_);
 
   // File to write trace data out to, null if direct to ddms.
   std::unique_ptr<File> trace_file_;
@@ -301,11 +384,11 @@ class TraceWriter {
   SafeMap<uint16_t, std::string> threads_list_;
 
   // Map from ArtMethod* to index.
-  std::unordered_map<ArtMethod*, uint32_t> art_method_id_map_ GUARDED_BY(tracing_lock_);
+  std::unordered_map<ArtMethod*, uint32_t> art_method_id_map_ GUARDED_BY(trace_writer_lock_);
   uint32_t current_method_index_ = 0;
 
   // Map from thread_id to a 16-bit identifier.
-  std::unordered_map<pid_t, uint16_t> thread_id_map_ GUARDED_BY(tracing_lock_);
+  std::unordered_map<pid_t, uint16_t> thread_id_map_ GUARDED_BY(trace_writer_lock_);
   uint16_t current_thread_index_;
 
   // Buffer used when generating trace data from the raw entries.
@@ -317,7 +400,7 @@ class TraceWriter {
 
   // The cur_offset_ into the buf_. Accessed only in SuspendAll scope when flushing data from the
   // thread local buffers to buf_.
-  size_t cur_offset_ GUARDED_BY(tracing_lock_);
+  size_t cur_offset_ GUARDED_BY(trace_writer_lock_);
 
   // Size of buf_.
   const size_t buffer_size_;
@@ -340,9 +423,15 @@ class TraceWriter {
   std::vector<std::atomic<size_t>> owner_tids_;
   std::unique_ptr<uintptr_t[]> trace_buffer_;
 
+  Mutex buffer_pool_lock_;
+  ConditionVariable buffer_available_ GUARDED_BY(buffer_pool_lock_);
+  ConditionVariable num_waiters_zero_cond_ GUARDED_BY(buffer_pool_lock_);
+  std::atomic<size_t> num_waiters_for_buffer_;
+  std::atomic<bool> finish_tracing_ = false;
+
   // Lock to protect common data structures accessed from multiple threads like
   // art_method_id_map_, thread_id_map_.
-  Mutex tracing_lock_;
+  Mutex trace_writer_lock_;
 
   // Thread pool to flush the trace entries to file.
   std::unique_ptr<TraceWriterThreadPool> thread_pool_;
@@ -351,7 +440,7 @@ class TraceWriter {
 // Class for recording event traces. Trace data is either collected
 // synchronously during execution (TracingMode::kMethodTracingActive),
 // or by a separate sampling thread (TracingMode::kSampleProfilingActive).
-class Trace final : public instrumentation::InstrumentationListener {
+class Trace final : public instrumentation::InstrumentationListener, public ClassLoadCallback {
  public:
   enum TraceFlag {
     kTraceCountAllocs = 0x001,
@@ -368,6 +457,9 @@ class Trace final : public instrumentation::InstrumentationListener {
     kMethodTracing,
     kSampling
   };
+
+  // Temporary code for debugging b/342768977
+  static std::string GetDebugInformation();
 
   static void SetDefaultClockSource(TraceClockSource clock_source);
 
@@ -417,6 +509,16 @@ class Trace final : public instrumentation::InstrumentationListener {
   static void FlushThreadBuffer(Thread* thread) REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Locks::trace_lock_) NO_THREAD_SAFETY_ANALYSIS;
 
+  // Release per-thread buffer without flushing any entries. This is used when a new trace buffer is
+  // allocated while the thread is terminating. See ThreadList::Unregister for more details.
+  static void ReleaseThreadBuffer(Thread* thread)
+      REQUIRES(!Locks::trace_lock_) NO_THREAD_SAFETY_ANALYSIS;
+
+  // Removes any listeners installed for method tracing. This is used in non-streaming case
+  // when we no longer record any events once the buffer is full. In other cases listeners are
+  // removed only when tracing stops. This is expected to be called in SuspendAll scope.
+  static void RemoveListeners() REQUIRES(Locks::mutator_lock_);
+
   void MeasureClockOverhead();
   uint32_t GetClockOverheadNanoSeconds();
 
@@ -456,6 +558,12 @@ class Trace final : public instrumentation::InstrumentationListener {
   void WatchedFramePop(Thread* thread, const ShadowFrame& frame)
       REQUIRES_SHARED(Locks::mutator_lock_) override;
 
+  // ClassLoadCallback implementation
+  void ClassLoad([[maybe_unused]] Handle<mirror::Class> klass)
+      REQUIRES_SHARED(Locks::mutator_lock_) override {}
+  void ClassPrepare(Handle<mirror::Class> temp_klass, Handle<mirror::Class> klass)
+      REQUIRES_SHARED(Locks::mutator_lock_) override;
+
   TraceClockSource GetClockSource() { return clock_source_; }
 
   // Reuse an old stack trace if it exists, otherwise allocate a new one.
@@ -471,6 +579,14 @@ class Trace final : public instrumentation::InstrumentationListener {
 
   // Used by class linker to prevent class unloading.
   static bool IsTracingEnabled() REQUIRES(!Locks::trace_lock_);
+
+  // Used by the profiler to see if there is any ongoing tracing.
+  static bool IsTracingEnabledLocked() REQUIRES(Locks::trace_lock_);
+
+  // Callback for each class prepare event to record information about the newly created methods.
+  static void ClassPrepare(Handle<mirror::Class> klass) REQUIRES_SHARED(Locks::mutator_lock_);
+
+  TraceWriter* GetTraceWriter() { return trace_writer_.get(); }
 
  private:
   Trace(File* trace_file,

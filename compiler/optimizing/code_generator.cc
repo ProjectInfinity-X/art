@@ -16,6 +16,7 @@
 
 #include "code_generator.h"
 #include "base/globals.h"
+#include "mirror/method_type.h"
 
 #ifdef ART_ENABLE_CODEGEN_arm
 #include "code_generator_arm_vixl.h"
@@ -209,11 +210,23 @@ uint64_t CodeGenerator::GetJitClassRootIndex(TypeReference type_reference) {
   return code_generation_data_->GetJitClassRootIndex(type_reference);
 }
 
+void CodeGenerator::ReserveJitMethodTypeRoot(ProtoReference proto_reference,
+                                             Handle<mirror::MethodType> method_type) {
+  DCHECK(code_generation_data_ != nullptr);
+  code_generation_data_->ReserveJitMethodTypeRoot(proto_reference, method_type);
+}
+
+uint64_t CodeGenerator::GetJitMethodTypeRootIndex(ProtoReference proto_reference) {
+  DCHECK(code_generation_data_ != nullptr);
+  return code_generation_data_->GetJitMethodTypeRootIndex(proto_reference);
+}
+
 void CodeGenerator::EmitJitRootPatches([[maybe_unused]] uint8_t* code,
                                        [[maybe_unused]] const uint8_t* roots_data) {
   DCHECK(code_generation_data_ != nullptr);
   DCHECK_EQ(code_generation_data_->GetNumberOfJitStringRoots(), 0u);
   DCHECK_EQ(code_generation_data_->GetNumberOfJitClassRoots(), 0u);
+  DCHECK_EQ(code_generation_data_->GetNumberOfJitMethodTypeRoots(), 0u);
 }
 
 uint32_t CodeGenerator::GetArrayLengthOffset(HArrayLength* array_length) {
@@ -493,11 +506,10 @@ void CodeGenerator::FinishCriticalNativeFrameSetup(size_t out_frame_size,
   GetMoveResolver()->EmitNativeCode(parallel_move);
 }
 
-const char* CodeGenerator::GetCriticalNativeShorty(HInvokeStaticOrDirect* invoke,
-                                                   uint32_t* shorty_len) {
+std::string_view CodeGenerator::GetCriticalNativeShorty(HInvokeStaticOrDirect* invoke) {
   ScopedObjectAccess soa(Thread::Current());
   DCHECK(invoke->GetResolvedMethod()->IsCriticalNative());
-  return invoke->GetResolvedMethod()->GetShorty(shorty_len);
+  return invoke->GetResolvedMethod()->GetShortyView();
 }
 
 void CodeGenerator::GenerateInvokeStaticOrDirectRuntimeCall(

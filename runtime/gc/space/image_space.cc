@@ -37,15 +37,13 @@
 #include "base/array_ref.h"
 #include "base/bit_memory_region.h"
 #include "base/callee_save_type.h"
-#include "base/enums.h"
 #include "base/file_utils.h"
 #include "base/globals.h"
 #include "base/macros.h"
 #include "base/memfd.h"
 #include "base/os.h"
-#include "base/scoped_flock.h"
+#include "base/pointer_size.h"
 #include "base/stl_util.h"
-#include "base/string_view_cpp20.h"
 #include "base/systrace.h"
 #include "base/time_utils.h"
 #include "base/utils.h"
@@ -995,24 +993,34 @@ class ImageSpace::Loader {
                               /*out*/std::string* error_msg)
         REQUIRES_SHARED(Locks::mutator_lock_) {
     TimingLogger::ScopedTiming timing("MapImageFile", logger);
-    std::string temp_error_msg;
+
+    // The runtime might not be available at this point if we're running dex2oat or oatdump, in
+    // which case we just truncate the madvise optimization limit completely.
+    Runtime* runtime = Runtime::Current();
+    const size_t madvise_size_limit = runtime ? runtime->GetMadviseWillNeedSizeArt() : 0;
+
     const bool is_compressed = image_header.HasCompressedBlock();
     if (!is_compressed && allow_direct_mapping) {
       uint8_t* address = (image_reservation != nullptr) ? image_reservation->Begin() : nullptr;
       // The reserved memory size is aligned up to kElfSegmentAlignment to ensure
       // that the next reserved area will be aligned to the value.
-      return MemMap::MapFileAtAddress(address,
-                                      CondRoundUp<kPageSizeAgnostic>(image_header.GetImageSize(),
-                                                                     kElfSegmentAlignment),
-                                      PROT_READ | PROT_WRITE,
-                                      MAP_PRIVATE,
-                                      fd,
-                                      /*start=*/ 0,
-                                      /*low_4gb=*/ true,
-                                      image_filename,
-                                      /*reuse=*/ false,
-                                      image_reservation,
-                                      error_msg);
+      MemMap map = MemMap::MapFileAtAddress(
+          address,
+          CondRoundUp<kPageSizeAgnostic>(image_header.GetImageSize(), kElfSegmentAlignment),
+          PROT_READ | PROT_WRITE,
+          MAP_PRIVATE,
+          fd,
+          /*start=*/0,
+          /*low_4gb=*/true,
+          image_filename,
+          /*reuse=*/false,
+          image_reservation,
+          error_msg);
+      if (map.IsValid()) {
+        Runtime::MadviseFileForRange(
+            madvise_size_limit, map.Size(), map.Begin(), map.End(), image_filename);
+      }
+      return map;
     }
 
     // Reserve output and copy/decompress into it.
@@ -1040,17 +1048,8 @@ class ImageSpace::Loader {
         return MemMap::Invalid();
       }
 
-      Runtime* runtime = Runtime::Current();
-      // The runtime might not be available at this point if we're running
-      // dex2oat or oatdump.
-      if (runtime != nullptr) {
-        size_t madvise_size_limit = runtime->GetMadviseWillNeedSizeArt();
-        Runtime::MadviseFileForRange(madvise_size_limit,
-                                     temp_map.Size(),
-                                     temp_map.Begin(),
-                                     temp_map.End(),
-                                     image_filename);
-      }
+      Runtime::MadviseFileForRange(
+          madvise_size_limit, temp_map.Size(), temp_map.Begin(), temp_map.End(), image_filename);
 
       if (is_compressed) {
         memcpy(map.Begin(), &image_header, sizeof(ImageHeader));
@@ -1125,7 +1124,10 @@ class ImageSpace::Loader {
    public:
     ALWAYS_INLINE bool InSource(uintptr_t) const { return false; }
     ALWAYS_INLINE bool InDest(uintptr_t) const { return false; }
-    ALWAYS_INLINE uintptr_t ToDest(uintptr_t) const { UNREACHABLE(); }
+    ALWAYS_INLINE uintptr_t ToDest(uintptr_t) const {
+      LOG(FATAL) << "Unreachable";
+      UNREACHABLE();
+    }
   };
 
   template <typename Range0, typename Range1 = EmptyRange, typename Range2 = EmptyRange>
@@ -1403,14 +1405,20 @@ class ImageSpace::Loader {
               method.SetImtConflictTable(new_table, kPointerSize);
             }
           }
-          const void* old_code = method.GetEntryPointFromQuickCompiledCodePtrSize(kPointerSize);
-          const void* new_code = forward_code(old_code);
-          if (old_code != new_code) {
-            method.SetEntryPointFromQuickCompiledCodePtrSize(new_code, kPointerSize);
-          }
         } else {
           patch_object_visitor.PatchGcRoot(&method.DeclaringClassRoot());
-          method.UpdateEntrypoints(forward_code, kPointerSize);
+          if (method.IsNative()) {
+            const void* old_native_code = method.GetEntryPointFromJniPtrSize(kPointerSize);
+            const void* new_native_code = forward_code(old_native_code);
+            if (old_native_code != new_native_code) {
+              method.SetEntryPointFromJniPtrSize(new_native_code, kPointerSize);
+            }
+          }
+        }
+        const void* old_code = method.GetEntryPointFromQuickCompiledCodePtrSize(kPointerSize);
+        const void* new_code = forward_code(old_code);
+        if (old_code != new_code) {
+          method.SetEntryPointFromQuickCompiledCode(new_code);
         }
       }, target_base, kPointerSize);
     }
@@ -1469,7 +1477,7 @@ static bool CheckAndRemoveImageChecksum(uint32_t component_count,
                                         /*out*/std::string* error_msg) {
   std::string image_checksum;
   ImageSpace::AppendImageChecksum(component_count, checksum, &image_checksum);
-  if (!StartsWith(*oat_checksums, image_checksum)) {
+  if (!oat_checksums->starts_with(image_checksum)) {
     *error_msg = StringPrintf("Image checksum mismatch, expected %s to start with %s",
                               std::string(*oat_checksums).c_str(),
                               image_checksum.c_str());
@@ -2181,7 +2189,7 @@ bool ImageSpace::BootImageLayout::Load(FilenameFn&& filename_fn,
           DCHECK_NE(slash_pos, std::string::npos);
           base_location = bcp_component.substr(0u, slash_pos + 1u) + base_name;
         } else {
-          DCHECK(EndsWith(path, "/*"));
+          DCHECK(path.ends_with("/*"));
           base_location = path.substr(0u, path.size() - 1u) + base_name;
         }
         std::string err_msg;  // Ignored.
@@ -2615,6 +2623,9 @@ class ImageSpace::BootImageLoader {
       };
       image_header.VisitPackedImTables(method_table_visitor, space->Begin(), kPointerSize);
       image_header.VisitPackedImtConflictTables(method_table_visitor, space->Begin(), kPointerSize);
+      image_header.VisitJniStubMethods</*kUpdate=*/ true>(method_table_visitor,
+                                                          space->Begin(),
+                                                          kPointerSize);
 
       // Patch the intern table.
       if (image_header.GetInternedStringsSection().Size() != 0u) {
@@ -2805,8 +2816,6 @@ class ImageSpace::BootImageLoader {
                                    /*out*/std::string* error_msg)
       REQUIRES_SHARED(Locks::mutator_lock_) {
     if (art_fd.get() != -1) {
-      // No need to lock memfd for which we hold the only file descriptor
-      // (see locking with ScopedFlock for normal files below).
       VLOG(startup) << "Using image file " << image_filename.c_str() << " for image location "
                     << image_location << " for compiled extension";
 
@@ -2823,15 +2832,6 @@ class ImageSpace::BootImageLoader {
       // the `image_file` as we no longer need it.
       return result;
     }
-
-    // Note that we must not use the file descriptor associated with
-    // ScopedFlock::GetFile to Init the image file. We want the file
-    // descriptor (and the associated exclusive lock) to be released when
-    // we leave Create.
-    ScopedFlock image = LockedFile::Open(image_filename.c_str(),
-                                         /*flags=*/ O_RDONLY,
-                                         /*block=*/ true,
-                                         error_msg);
 
     VLOG(startup) << "Using image file " << image_filename.c_str() << " for image location "
                   << image_location;
@@ -3341,9 +3341,6 @@ bool ImageSpace::LoadBootImage(const std::vector<std::string>& boot_class_path,
                          &apex_versions);
   loader.FindImageFiles();
 
-  // Collect all the errors.
-  std::vector<std::string> error_msgs;
-
   std::string error_msg;
   if (loader.LoadFromSystem(extra_reservation_size,
                             allow_in_memory_compilation,
@@ -3352,22 +3349,10 @@ bool ImageSpace::LoadBootImage(const std::vector<std::string>& boot_class_path,
                             &error_msg)) {
     return true;
   }
-  error_msgs.push_back(error_msg);
-
-  std::ostringstream oss;
-  bool first = true;
-  for (const auto& msg : error_msgs) {
-    if (first) {
-      first = false;
-    } else {
-      oss << "\n    ";
-    }
-    oss << msg;
-  }
-
   LOG(ERROR) << "Could not create image space with image file '"
-      << Join(image_locations, kComponentSeparator) << "'. Attempting to fall back to imageless "
-      << "running. Error was: " << oss.str();
+             << Join(image_locations, kComponentSeparator)
+             << "'. Attempting to fall back to imageless running. Error was: "
+             << error_msg;
 
   return false;
 }
@@ -3435,7 +3420,7 @@ bool ImageSpace::ValidateApexVersions(const OatHeader& oat_header,
   // For a boot image, it can be generated from a subset of the bootclasspath.
   // For an app image, some dex files get compiled with a subset of the bootclasspath.
   // For such cases, the OAT APEX versions will be a prefix of the runtime APEX versions.
-  if (!android::base::StartsWith(apex_versions, oat_apex_versions)) {
+  if (!apex_versions.starts_with(oat_apex_versions)) {
     *error_msg = StringPrintf(
         "ValidateApexVersions found APEX versions mismatch between oat file '%s' and the runtime "
         "(Oat file: '%s', Runtime: '%s')",
@@ -3589,7 +3574,7 @@ size_t ImageSpace::CheckAndCountBCPComponents(std::string_view oat_boot_class_pa
   std::string_view remaining_bcp(oat_boot_class_path);
   bool bcp_ok = false;
   for (const std::string& location : boot_class_path) {
-    if (!StartsWith(remaining_bcp, location)) {
+    if (!remaining_bcp.starts_with(location)) {
       break;
     }
     remaining_bcp.remove_prefix(location.size());
@@ -3598,7 +3583,7 @@ size_t ImageSpace::CheckAndCountBCPComponents(std::string_view oat_boot_class_pa
       bcp_ok = true;
       break;
     }
-    if (!StartsWith(remaining_bcp, ":")) {
+    if (!remaining_bcp.starts_with(":")) {
       break;
     }
     remaining_bcp.remove_prefix(1u);
@@ -3649,7 +3634,7 @@ bool ImageSpace::VerifyBootClassPathChecksums(
   // Verify image checksums.
   size_t bcp_pos = 0u;
   size_t image_pos = 0u;
-  while (image_pos != num_image_spaces && StartsWith(oat_checksums, "i")) {
+  while (image_pos != num_image_spaces && oat_checksums.starts_with("i")) {
     // Verify the current image checksum.
     const ImageHeader& current_header = image_spaces[image_pos]->GetImageHeader();
     uint32_t image_space_count = current_header.GetImageSpaceCount();
@@ -3687,7 +3672,7 @@ bool ImageSpace::VerifyBootClassPathChecksums(
     image_pos += image_space_count;
     bcp_pos += component_count;
 
-    if (!StartsWith(oat_checksums, ":")) {
+    if (!oat_checksums.starts_with(":")) {
       // Check that we've reached the end of checksums and BCP.
       if (!oat_checksums.empty()) {
          *error_msg = StringPrintf("Expected ':' separator or end of checksums, remaining %s.",

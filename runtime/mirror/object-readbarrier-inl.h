@@ -20,6 +20,7 @@
 #include "object.h"
 
 #include "base/atomic.h"
+#include "class_linker.h"
 #include "heap_poisoning.h"
 #include "lock_word-inl.h"
 #include "object_reference-inl.h"
@@ -46,16 +47,18 @@ inline bool Object::CasField32(MemberOffset field_offset,
   if (kCheckTransaction) {
     DCHECK_EQ(kTransactionActive, Runtime::Current()->IsActiveTransaction());
   }
-  if (kTransactionActive) {
-    Runtime::Current()->RecordWriteField32(this, field_offset, old_value, true);
-  }
   if (kVerifyFlags & kVerifyThis) {
     VerifyObject(this);
   }
   uint8_t* raw_addr = reinterpret_cast<uint8_t*>(this) + field_offset.Int32Value();
   AtomicInteger* atomic_addr = reinterpret_cast<AtomicInteger*>(raw_addr);
 
-  return atomic_addr->CompareAndSet(old_value, new_value, mode, memory_order);
+  bool success = atomic_addr->CompareAndSet(old_value, new_value, mode, memory_order);
+  if (kTransactionActive && success) {
+    Runtime::Current()->GetClassLinker()->RecordWriteField32(
+        this, field_offset, old_value, /*is_volatile=*/ true);
+  }
+  return success;
 }
 
 inline bool Object::CasLockWord(LockWord old_val,

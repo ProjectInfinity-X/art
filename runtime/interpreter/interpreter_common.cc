@@ -19,7 +19,8 @@
 #include <cmath>
 
 #include "base/casts.h"
-#include "base/enums.h"
+#include "base/pointer_size.h"
+#include "class_linker.h"
 #include "class_root-inl.h"
 #include "debugger.h"
 #include "dex/dex_file_types.h"
@@ -46,9 +47,8 @@
 #include "shadow_frame-inl.h"
 #include "stack.h"
 #include "thread-inl.h"
-#include "transaction.h"
 #include "var_handles.h"
-#include "well_known_classes.h"
+#include "well_known_classes-inl.h"
 
 namespace art HIDDEN {
 namespace interpreter {
@@ -208,22 +208,6 @@ void UnexpectedOpcode(const Instruction* inst, const ShadowFrame& shadow_frame) 
   LOG(FATAL) << "Unexpected instruction: "
              << inst->DumpString(shadow_frame.GetMethod()->GetDexFile());
   UNREACHABLE();
-}
-
-void AbortTransactionF(Thread* self, const char* fmt, ...) {
-  va_list args;
-  va_start(args, fmt);
-  AbortTransactionV(self, fmt, args);
-  va_end(args);
-}
-
-void AbortTransactionV(Thread* self, const char* fmt, va_list args) {
-  CHECK(Runtime::Current()->IsActiveTransaction());
-  // Constructs abort message.
-  std::string abort_msg;
-  android::base::StringAppendV(&abort_msg, fmt, args);
-  // Throws an exception so we can abort the transaction and rollback every change.
-  Runtime::Current()->AbortTransactionAndThrowAbortError(self, abort_msg);
 }
 
 // START DECLARATIONS :
@@ -455,12 +439,10 @@ static bool DoVarHandleInvokeCommon(Thread* self,
   bool is_var_args = inst->HasVarArgs();
   const uint32_t vRegC = is_var_args ? inst->VRegC_45cc() : inst->VRegC_4rcc();
   const uint16_t vRegH = is_var_args ? inst->VRegH_45cc() : inst->VRegH_4rcc();
-  StackHandleScope<4> hs(self);
+  StackHandleScope<1> hs(self);
   Handle<mirror::VarHandle> var_handle = hs.NewHandle(
       ObjPtr<mirror::VarHandle>::DownCast(shadow_frame.GetVRegReference(vRegC)));
   ArtMethod* method = shadow_frame.GetMethod();
-  Handle<mirror::DexCache> dex_cache = hs.NewHandle(method->GetDexCache());
-  Handle<mirror::ClassLoader> class_loader = hs.NewHandle(method->GetClassLoader());
   uint32_t var_args[Instruction::kMaxVarArgRegs];
   std::optional<VarArgsInstructionOperands> var_args_operands(std::nullopt);
   std::optional<RangeInstructionOperands> range_operands(std::nullopt);
@@ -474,50 +456,12 @@ static bool DoVarHandleInvokeCommon(Thread* self,
     all_operands = &range_operands.value();
   }
   NoReceiverInstructionOperands operands(all_operands);
-  ClassLinker* const class_linker = Runtime::Current()->GetClassLinker();
-
-  // If the `ThreadLocalRandom` class is not yet initialized, do the `VarHandle` operation
-  // without creating a managed `MethodType` object. This avoids a circular initialization
-  // issue when `ThreadLocalRandom.<clinit>` indirectly calls `AtomicLong.compareAndSet()`
-  // (implemented with a `VarHandle`) and the `MethodType` caching circles back to the
-  // `ThreadLocalRandom` with uninitialized `seeder` and throws NPE.
-  //
-  // Do a quick test for "visibly initialized" without a read barrier and, if that fails,
-  // do a thorough test for "initialized" (including load acquire) with the read barrier.
-  ArtField* field = WellKnownClasses::java_util_concurrent_ThreadLocalRandom_seeder;
-  if (UNLIKELY(!field->GetDeclaringClass<kWithoutReadBarrier>()->IsVisiblyInitialized()) &&
-      !field->GetDeclaringClass()->IsInitialized()) {
-    VariableSizedHandleScope callsite_type_hs(self);
-    mirror::RawMethodType callsite_type(&callsite_type_hs);
-    if (!class_linker->ResolveMethodType(self,
-                                         dex::ProtoIndex(vRegH),
-                                         dex_cache,
-                                         class_loader,
-                                         callsite_type)) {
-      CHECK(self->IsExceptionPending());
-      return false;
-    }
-    return VarHandleInvokeAccessor(self,
-                                   shadow_frame,
-                                   var_handle,
-                                   callsite_type,
-                                   access_mode,
-                                   &operands,
-                                   result);
-  }
-
-  Handle<mirror::MethodType> callsite_type(hs.NewHandle(
-      class_linker->ResolveMethodType(self, dex::ProtoIndex(vRegH), dex_cache, class_loader)));
-  // This implies we couldn't resolve one or more types in this VarHandle.
-  if (UNLIKELY(callsite_type == nullptr)) {
-    CHECK(self->IsExceptionPending());
-    return false;
-  }
 
   return VarHandleInvokeAccessor(self,
                                  shadow_frame,
                                  var_handle,
-                                 callsite_type,
+                                 method,
+                                 dex::ProtoIndex(vRegH),
                                  access_mode,
                                  &operands,
                                  result);
@@ -583,7 +527,7 @@ bool DoInvokePolymorphic(Thread* self,
   DCHECK(invoke_method->IsIntrinsic());
 
   // Dispatch based on intrinsic identifier associated with method.
-  switch (static_cast<art::Intrinsics>(invoke_method->GetIntrinsic())) {
+  switch (invoke_method->GetIntrinsic()) {
 #define CASE_SIGNATURE_POLYMORPHIC_INTRINSIC(Name, ...) \
     case Intrinsics::k##Name:                           \
       return Do ## Name(self, shadow_frame, inst, inst_data, result);
@@ -639,6 +583,7 @@ static ObjPtr<mirror::Class> GetClassForBootstrapArgument(EncodedArrayValueItera
     case EncodedArrayValueIterator::ValueType::kNull:
       return nullptr;
     case EncodedArrayValueIterator::ValueType::kEndOfInput:
+      LOG(FATAL) << "Unreachable";
       UNREACHABLE();
   }
 }
@@ -721,8 +666,8 @@ static bool GetArgumentForBootstrapMethod(Thread* self,
       // Unreachable - unsupported types that have been checked when
       // determining the effect call site type based on the bootstrap
       // argument types.
-      UNREACHABLE();
     case EncodedArrayValueIterator::ValueType::kEndOfInput:
+      LOG(FATAL) << "Unreachable";
       UNREACHABLE();
   }
 }
@@ -766,8 +711,8 @@ static bool PackArgumentForBootstrapMethod(Thread* self,
       // Unreachable - unsupported types that have been checked when
       // determining the effect call site type based on the bootstrap
       // argument types.
-      UNREACHABLE();
     case EncodedArrayValueIterator::ValueType::kEndOfInput:
+      LOG(FATAL) << "Unreachable";
       UNREACHABLE();
   }
 }
@@ -853,6 +798,8 @@ static bool PackCollectorArrayForBootstrapMethod(Thread* self,
   } else if (component_type == GetClassRoot<mirror::Class>()) {
     COLLECT_REFERENCE_ARRAY(mirror::Class, Type);
   } else {
+    component_type->DumpClass(LOG_STREAM(FATAL_WITHOUT_ABORT), mirror::Class::kDumpClassFullDetail);
+    LOG(FATAL) << "unexpected class: " << component_type->PrettyTypeOf();
     UNREACHABLE();
   }
   #undef COLLECT_PRIMITIVE_ARRAY
@@ -1448,7 +1395,7 @@ bool DoCall(ArtMethod* called_method,
       is_string_init);
 }
 
-template <bool is_range, bool transaction_active>
+template <bool is_range>
 bool DoFilledNewArray(const Instruction* inst,
                       const ShadowFrame& shadow_frame,
                       Thread* self,
@@ -1506,13 +1453,21 @@ bool DoFilledNewArray(const Instruction* inst,
   } else {
     inst->GetVarArgs(arg);
   }
-  for (int32_t i = 0; i < length; ++i) {
-    size_t src_reg = is_range ? vregC + i : arg[i];
-    if (is_primitive_int_component) {
-      new_array->AsIntArray()->SetWithoutChecks<transaction_active>(
+  // We're initializing a newly allocated array, so we do not need to record that under
+  // a transaction. If the transaction is aborted, the whole array shall be unreachable.
+  if (LIKELY(is_primitive_int_component)) {
+    ObjPtr<mirror::IntArray> int_array = new_array->AsIntArray();
+    for (int32_t i = 0; i < length; ++i) {
+      size_t src_reg = is_range ? vregC + i : arg[i];
+      int_array->SetWithoutChecks</*kTransactionActive=*/ false, /*kCheckTransaction=*/ false>(
           i, shadow_frame.GetVReg(src_reg));
-    } else {
-      new_array->AsObjectArray<mirror::Object>()->SetWithoutChecks<transaction_active>(
+    }
+  } else {
+    ObjPtr<mirror::ObjectArray<mirror::Object>> object_array =
+        new_array->AsObjectArray<mirror::Object>();
+    for (int32_t i = 0; i < length; ++i) {
+      size_t src_reg = is_range ? vregC + i : arg[i];
+      object_array->SetWithoutChecks</*kTransactionActive=*/ false, /*kCheckTransaction=*/ false>(
           i, shadow_frame.GetVRegReference(src_reg));
     }
   }
@@ -1521,58 +1476,11 @@ bool DoFilledNewArray(const Instruction* inst,
   return true;
 }
 
-// TODO: Use ObjPtr here.
-template<typename T>
-static void RecordArrayElementsInTransactionImpl(ObjPtr<mirror::PrimitiveArray<T>> array,
-                                                 int32_t count)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
-  Runtime* runtime = Runtime::Current();
-  for (int32_t i = 0; i < count; ++i) {
-    runtime->RecordWriteArray(array.Ptr(), i, array->GetWithoutChecks(i));
-  }
-}
-
-void RecordArrayElementsInTransaction(ObjPtr<mirror::Array> array, int32_t count)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
-  DCHECK(Runtime::Current()->IsActiveTransaction());
-  DCHECK(array != nullptr);
-  DCHECK_LE(count, array->GetLength());
-  Primitive::Type primitive_component_type = array->GetClass()->GetComponentType()->GetPrimitiveType();
-  switch (primitive_component_type) {
-    case Primitive::kPrimBoolean:
-      RecordArrayElementsInTransactionImpl(array->AsBooleanArray(), count);
-      break;
-    case Primitive::kPrimByte:
-      RecordArrayElementsInTransactionImpl(array->AsByteArray(), count);
-      break;
-    case Primitive::kPrimChar:
-      RecordArrayElementsInTransactionImpl(array->AsCharArray(), count);
-      break;
-    case Primitive::kPrimShort:
-      RecordArrayElementsInTransactionImpl(array->AsShortArray(), count);
-      break;
-    case Primitive::kPrimInt:
-      RecordArrayElementsInTransactionImpl(array->AsIntArray(), count);
-      break;
-    case Primitive::kPrimFloat:
-      RecordArrayElementsInTransactionImpl(array->AsFloatArray(), count);
-      break;
-    case Primitive::kPrimLong:
-      RecordArrayElementsInTransactionImpl(array->AsLongArray(), count);
-      break;
-    case Primitive::kPrimDouble:
-      RecordArrayElementsInTransactionImpl(array->AsDoubleArray(), count);
-      break;
-    default:
-      LOG(FATAL) << "Unsupported primitive type " << primitive_component_type
-                 << " in fill-array-data";
-      UNREACHABLE();
-  }
-}
-
 void UnlockHeldMonitors(Thread* self, ShadowFrame* shadow_frame)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  DCHECK(shadow_frame->GetForcePopFrame() || Runtime::Current()->IsTransactionAborted());
+  DCHECK(shadow_frame->GetForcePopFrame() ||
+         (Runtime::Current()->IsActiveTransaction() &&
+             Runtime::Current()->GetClassLinker()->IsTransactionAborted()));
   // Unlock all monitors.
   if (shadow_frame->GetMethod()->MustCountLocks()) {
     DCHECK(!shadow_frame->GetMethod()->SkipAccessChecks());
@@ -1602,6 +1510,26 @@ void UnlockHeldMonitors(Thread* self, ShadowFrame* shadow_frame)
   }
 }
 
+void PerformNonStandardReturn(Thread* self,
+                              ShadowFrame& frame,
+                              JValue& result,
+                              const instrumentation::Instrumentation* instrumentation,
+                              bool unlock_monitors) {
+  if (UNLIKELY(self->IsExceptionPending())) {
+    LOG(WARNING) << "Suppressing exception for non-standard method exit: "
+                 << self->GetException()->Dump();
+    self->ClearException();
+  }
+  if (unlock_monitors) {
+    UnlockHeldMonitors(self, &frame);
+    DoMonitorCheckOnExit(self, &frame);
+  }
+  result = JValue();
+  if (UNLIKELY(NeedsMethodExitEvent(instrumentation))) {
+    SendMethodExitEvents(self, instrumentation, frame, frame.GetMethod(), result);
+  }
+}
+
 // Explicit DoCall template function declarations.
 #define EXPLICIT_DO_CALL_TEMPLATE_DECL(_is_range)                      \
   template REQUIRES_SHARED(Locks::mutator_lock_)                       \
@@ -1627,18 +1555,14 @@ EXPLICIT_DO_INVOKE_POLYMORPHIC_TEMPLATE_DECL(true);
 #undef EXPLICIT_DO_INVOKE_POLYMORPHIC_TEMPLATE_DECL
 
 // Explicit DoFilledNewArray template function declarations.
-#define EXPLICIT_DO_FILLED_NEW_ARRAY_TEMPLATE_DECL(_is_range_, _transaction_active)               \
-  template REQUIRES_SHARED(Locks::mutator_lock_)                                                  \
-  bool DoFilledNewArray<_is_range_, _transaction_active>(const Instruction* inst,                 \
-                                                         const ShadowFrame& shadow_frame,         \
-                                                         Thread* self,                            \
-                                                         JValue* result)
-#define EXPLICIT_DO_FILLED_NEW_ARRAY_ALL_TEMPLATE_DECL(_transaction_active)                       \
-  EXPLICIT_DO_FILLED_NEW_ARRAY_TEMPLATE_DECL(false, _transaction_active);                         \
-  EXPLICIT_DO_FILLED_NEW_ARRAY_TEMPLATE_DECL(true, _transaction_active)
-EXPLICIT_DO_FILLED_NEW_ARRAY_ALL_TEMPLATE_DECL(false);
-EXPLICIT_DO_FILLED_NEW_ARRAY_ALL_TEMPLATE_DECL(true);
-#undef EXPLICIT_DO_FILLED_NEW_ARRAY_ALL_TEMPLATE_DECL
+#define EXPLICIT_DO_FILLED_NEW_ARRAY_TEMPLATE_DECL(_is_range_)               \
+  template REQUIRES_SHARED(Locks::mutator_lock_)                             \
+  bool DoFilledNewArray<_is_range_>(const Instruction* inst,                 \
+                                    const ShadowFrame& shadow_frame,         \
+                                    Thread* self,                            \
+                                    JValue* result)
+EXPLICIT_DO_FILLED_NEW_ARRAY_TEMPLATE_DECL(false);
+EXPLICIT_DO_FILLED_NEW_ARRAY_TEMPLATE_DECL(true);
 #undef EXPLICIT_DO_FILLED_NEW_ARRAY_TEMPLATE_DECL
 
 }  // namespace interpreter

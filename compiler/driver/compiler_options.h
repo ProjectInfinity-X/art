@@ -292,7 +292,7 @@ class CompilerOptions final {
 
   // Returns whether the given `pretty_descriptor` is in the list of preloaded
   // classes. `pretty_descriptor` should be the result of calling `PrettyDescriptor`.
-  EXPORT bool IsPreloadedClass(const char* pretty_descriptor) const;
+  EXPORT bool IsPreloadedClass(std::string_view pretty_descriptor) const;
 
   bool ParseCompilerOptions(const std::vector<std::string>& options,
                             bool ignore_unrecognized,
@@ -324,10 +324,6 @@ class CompilerOptions final {
 
   bool DeduplicateCode() const {
     return deduplicate_code_;
-  }
-
-  RegisterAllocator::Strategy GetRegisterAllocationStrategy() const {
-    return register_allocation_strategy_;
   }
 
   const std::vector<std::string>* GetPassesToRun() const {
@@ -383,7 +379,6 @@ class CompilerOptions final {
 
  private:
   EXPORT bool ParseDumpInitFailures(const std::string& option, std::string* error_msg);
-  EXPORT bool ParseRegisterAllocationStrategy(const std::string& option, std::string* error_msg);
 
   CompilerFilter::Filter compiler_filter_;
   size_t huge_method_threshold_;
@@ -476,8 +471,6 @@ class CompilerOptions final {
 
   // Maximum solid block size in the generated image.
   uint32_t max_image_block_size_;
-
-  RegisterAllocator::Strategy register_allocation_strategy_;
 
   // If not null, specifies optimization passes which will be run instead of defaults.
   // Note that passes_to_run_ is not checked for correctness and providing an incorrect

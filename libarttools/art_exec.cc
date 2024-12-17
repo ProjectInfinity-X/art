@@ -35,6 +35,7 @@
 #include "android-base/result.h"
 #include "android-base/strings.h"
 #include "base/macros.h"
+#include "base/os.h"
 #include "base/scoped_cap.h"
 #include "palette/palette.h"
 #include "system/thread_defs.h"
@@ -46,6 +47,7 @@ using ::android::base::Join;
 using ::android::base::ParseInt;
 using ::android::base::Result;
 using ::android::base::Split;
+using ::art::OS;
 
 constexpr const char* kUsage =
     R"(A wrapper binary that configures the process and executes a command.
@@ -67,6 +69,8 @@ Supported options:
   --keep-fds=FILE_DESCRIPTORS: A semicolon-separated list of file descriptors to keep open.
   --env=KEY=VALUE: Set an environment variable. This flag can be passed multiple times to set
       multiple environment variables.
+  --process-name-suffix=SUFFIX: Add a suffix in parentheses to argv[0] when calling `execv`. This
+      suffix will show up as part of the process name in tombstone when the process crashes.
 )";
 
 constexpr int kErrorUsage = 100;
@@ -80,6 +84,7 @@ struct Options {
   std::unordered_set<int> keep_fds{fileno(stdin), fileno(stdout), fileno(stderr)};
   std::unordered_map<std::string, std::string> envs;
   std::string chroot;
+  std::string process_name_suffix;
 };
 
 [[noreturn]] void Usage(const std::string& error_msg) {
@@ -125,6 +130,8 @@ Options ParseOptions(int argc, char** argv) {
           std::string(arg.substr(pos + 1));
     } else if (ConsumePrefix(&arg, "--chroot=")) {
       options.chroot = arg;
+    } else if (ConsumePrefix(&arg, "--process-name-suffix=")) {
+      options.process_name_suffix = arg;
     } else if (arg == "--") {
       if (i + 1 >= argc) {
         Usage("Missing command after '--'");
@@ -224,9 +231,27 @@ int main(int argc, char** argv) {
     }
   }
 
-  execv(argv[options.command_pos], argv + options.command_pos);
+  // `argv[argc]` is `nullptr`, which `execv` needs.
+  std::vector<char*> command_args(&argv[options.command_pos], &argv[argc + 1]);
+  std::string program_path = argv[options.command_pos];
+  // "/mnt/compat_env" is prepared by dexopt_chroot_setup on Android V.
+  constexpr const char* kCompatArtdPath = "/mnt/compat_env/apex/com.android.art/bin/artd";
+  if (program_path == "/apex/com.android.art/bin/artd" && OS::FileExists(kCompatArtdPath)) {
+    LOG(INFO) << "Overriding program path to " << kCompatArtdPath;
+    program_path = kCompatArtdPath;
+    command_args[0] = program_path.data();
+  }
+  std::string override_program_name;
+  if (!options.process_name_suffix.empty()) {
+    override_program_name = ART_FORMAT("{} ({})", command_args[0], options.process_name_suffix);
+    command_args[0] = override_program_name.data();
+  }
 
-  std::vector<const char*> command_args(argv + options.command_pos, argv + argc);
+  execv(program_path.c_str(), command_args.data());
+
+  // Remove the trialing `nullptr`.
+  command_args.resize(command_args.size() - 1);
+
   PLOG(FATAL) << "Failed to execute (" << Join(command_args, ' ') << ")";
   UNREACHABLE();
 }

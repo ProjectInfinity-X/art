@@ -111,6 +111,7 @@ void CommonRuntimeTestImpl::SetUp() {
   static bool gSlowDebugTestFlag = false;
   RegisterRuntimeDebugFlag(&gSlowDebugTestFlag);
 
+  // Create default compiler callbacks. `SetUpRuntimeOptions()` can replace or remove this.
   callbacks_.reset(new NoopCompilerCallbacks());
 
   SetUpRuntimeOptions(&options);
@@ -541,25 +542,6 @@ std::string CommonRuntimeTestImpl::GetImageLocation() {
 std::string CommonRuntimeTestImpl::GetSystemImageFile() {
   std::string isa = GetInstructionSetString(kRuntimeISA);
   return GetImageDirectory() + "/" + isa + "/boot.art";
-}
-
-void CommonRuntimeTestImpl::EnterTransactionMode() {
-  CHECK(!Runtime::Current()->IsActiveTransaction());
-  Runtime::Current()->EnterTransactionMode(/*strict=*/ false, /*root=*/ nullptr);
-}
-
-void CommonRuntimeTestImpl::ExitTransactionMode() {
-  Runtime::Current()->ExitTransactionMode();
-  CHECK(!Runtime::Current()->IsActiveTransaction());
-}
-
-void CommonRuntimeTestImpl::RollbackAndExitTransactionMode() {
-  Runtime::Current()->RollbackAndExitTransactionMode();
-  CHECK(!Runtime::Current()->IsActiveTransaction());
-}
-
-bool CommonRuntimeTestImpl::IsTransactionAborted() {
-  return Runtime::Current()->IsTransactionAborted();
 }
 
 void CommonRuntimeTestImpl::VisitDexes(ArrayRef<const std::string> dexes,

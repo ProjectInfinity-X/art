@@ -30,9 +30,9 @@
 #include "art_field-inl.h"
 #include "art_method-inl.h"
 #include "base/callee_save_type.h"
-#include "base/enums.h"
 #include "base/globals.h"
 #include "base/logging.h"  // For VLOG.
+#include "base/pointer_size.h"
 #include "base/stl_util.h"
 #include "base/unix_file/fd_file.h"
 #include "class_linker-inl.h"
@@ -78,6 +78,7 @@
 #include "nterp_helpers.h"
 #include "oat/elf_file.h"
 #include "oat/image-inl.h"
+#include "oat/jni_stub_hash_map-inl.h"
 #include "oat/oat.h"
 #include "oat/oat_file.h"
 #include "oat/oat_file_manager.h"
@@ -85,6 +86,8 @@
 #include "runtime.h"
 #include "scoped_thread_state_change-inl.h"
 #include "subtype_check.h"
+#include "thread-current-inl.h"  // For AssertOnly1Thread.
+#include "thread_list.h"         // For AssertOnly1Thread.
 #include "well_known_classes-inl.h"
 
 using ::art::mirror::Class;
@@ -452,8 +455,6 @@ static void ClearDexFileCookies() REQUIRES_SHARED(Locks::mutator_lock_) {
 }
 
 bool ImageWriter::PrepareImageAddressSpace(TimingLogger* timings) {
-  target_ptr_size_ = InstructionSetPointerSize(compiler_options_.GetInstructionSet());
-
   Thread* const self = Thread::Current();
 
   gc::Heap* const heap = Runtime::Current()->GetHeap();
@@ -571,6 +572,7 @@ bool ImageWriter::Write(int image_fd,
     for (size_t i = 0; i < oat_filenames_.size(); ++i) {
       CreateHeader(i, component_count);
       CopyAndFixupNativeData(i);
+      CopyAndFixupJniStubMethods(i);
     }
   }
 
@@ -1100,7 +1102,17 @@ bool ImageWriter::KeepClass(ObjPtr<mirror::Class> klass) {
     // the boot image spaces since these may have already been loaded at
     // run time when this image is loaded. Keep classes in the boot image
     // spaces we're compiling against since we don't want to re-resolve these.
-    return !PruneImageClass(klass);
+    // FIXME: Update image classes in the `CompilerOptions` after initializing classes
+    // with `--initialize-app-image-classes=true`. This experimental flag can currently
+    // cause an inconsistency between `CompilerOptions::IsImageClass()` and what actually
+    // ends up in the app image as seen in the run-test `660-clinit` where the class
+    // `ObjectRef` is considered an app image class during compilation but in the end
+    // it's pruned here. This inconsistency should be fixed if we want to properly
+    // initialize app image classes. b/38313278
+    bool keep = !PruneImageClass(klass);
+    CHECK_IMPLIES(!compiler_options_.InitializeAppImageClasses(), keep)
+        << klass->PrettyDescriptor();
+    return keep;
   }
   return true;
 }
@@ -1463,6 +1475,17 @@ void ImageWriter::RecordNativeRelocations(ObjPtr<mirror::Class> klass, size_t oa
     for (auto& m : klass->GetMethods(target_ptr_size_)) {
       AssignMethodOffset(&m, type, oat_index);
     }
+    // Only write JNI stub methods in boot images, but not in boot image extensions and app images.
+    // And the write only happens in non-debuggable since we never use AOT code for debuggable.
+    if (compiler_options_.IsBootImage() &&
+        compiler_options_.IsJniCompilationEnabled() &&
+        !compiler_options_.GetDebuggable()) {
+      for (auto& m : klass->GetMethods(target_ptr_size_)) {
+        if (m.IsNative() && !m.IsIntrinsic()) {
+          AssignJniStubMethodOffset(&m, oat_index);
+        }
+      }
+    }
     (any_dirty ? dirty_methods_ : clean_methods_) += num_methods;
   }
   // Assign offsets for all runtime methods in the IMT since these may hold conflict tables
@@ -1542,6 +1565,20 @@ void ImageWriter::AssignMethodOffset(ArtMethod* method,
   native_object_relocations_.insert(
       std::make_pair(method, NativeObjectRelocation{oat_index, offset, type}));
   image_info.IncrementBinSlotSize(bin_type, ArtMethod::Size(target_ptr_size_));
+}
+
+void ImageWriter::AssignJniStubMethodOffset(ArtMethod* method, size_t oat_index) {
+  CHECK(method->IsNative());
+  auto it = jni_stub_map_.find(JniStubKey(method));
+  if (it == jni_stub_map_.end()) {
+    ImageInfo& image_info = GetImageInfo(oat_index);
+    constexpr Bin bin_type = Bin::kJniStubMethod;
+    size_t offset = image_info.GetBinSlotSize(bin_type);
+    jni_stub_map_.Put(std::make_pair(
+        JniStubKey(method),
+        std::make_pair(method, JniStubMethodRelocation{oat_index, offset})));
+    image_info.IncrementBinSlotSize(bin_type, static_cast<size_t>(target_ptr_size_));
+  }
 }
 
 class ImageWriter::LayoutHelper {
@@ -2052,8 +2089,8 @@ void ImageWriter::LayoutHelper::ProcessInterns(Thread* self) {
     // Assign bin slots for strings defined in this dex file in StringId (lexicographical) order.
     for (size_t i = 0, count = dex_file->NumStringIds(); i != count; ++i) {
       uint32_t utf16_length;
-      const char* utf8_data = dex_file->StringDataAndUtf16LengthByIdx(dex::StringIndex(i),
-                                                                      &utf16_length);
+      const char* utf8_data = dex_file->GetStringDataAndUtf16Length(dex::StringIndex(i),
+                                                                    &utf16_length);
       uint32_t hash = InternTable::Utf8String::Hash(utf16_length, utf8_data);
       auto intern_it =
           intern_set.FindWithHash(InternTable::Utf8String(utf16_length, utf8_data), hash);
@@ -2491,11 +2528,18 @@ void ImageWriter::LayoutHelper::AssignImageBinSlot(
   bin_objects_[oat_index][enum_cast<size_t>(bin)].push_back(object.Ptr());
 }
 
+static inline void AssertOnly1Thread() REQUIRES(!Locks::thread_list_lock_) {
+  if (kIsDebugBuild) {
+    Runtime::Current()->GetThreadList()->CheckOnly1Thread(Thread::Current());
+  }
+}
+
 void ImageWriter::CalculateNewObjectOffsets() {
   Thread* const self = Thread::Current();
   Runtime* const runtime = Runtime::Current();
   gc::Heap* const heap = runtime->GetHeap();
 
+  AssertOnly1Thread();
   // Leave space for the header, but do not write it yet, we need to
   // know where image_roots is going to end up
   image_objects_offset_begin_ = RoundUp(sizeof(ImageHeader), kObjectAlignment);  // 64-bit-alignment
@@ -2530,10 +2574,12 @@ void ImageWriter::CalculateNewObjectOffsets() {
   // Deflate monitors before we visit roots since deflating acquires the monitor lock. Acquiring
   // this lock while holding other locks may cause lock order violations.
   {
-    auto deflate_monitor = [](mirror::Object* obj) REQUIRES_SHARED(Locks::mutator_lock_) {
-      Monitor::Deflate(Thread::Current(), obj);
-    };
+    auto deflate_monitor =
+        // NO_THREAD_SAFETY_ANALYSIS: We don't really hold mutator_lock_ exclusively.
+        [](mirror::Object* obj) REQUIRES_SHARED(Locks::mutator_lock_)
+            NO_THREAD_SAFETY_ANALYSIS { Monitor::Deflate(Thread::Current(), obj); };
     heap->VisitObjects(deflate_monitor);
+    // This does not update the MonitorList, which is thus rendered invalid, and is no longer used.
   }
 
   // From this point on, there shall be no GC anymore and no objects shall be allocated.
@@ -2607,6 +2653,14 @@ void ImageWriter::CalculateNewObjectOffsets() {
     ImageInfo& image_info = GetImageInfo(relocation.oat_index);
     relocation.offset += image_info.GetBinSlotOffset(bin_type);
   }
+
+  // Update the JNI stub methods by adding their bin sums.
+  for (auto& pair : jni_stub_map_) {
+    JniStubMethodRelocation& relocation = pair.second.second;
+    constexpr Bin bin_type = Bin::kJniStubMethod;
+    ImageInfo& image_info = GetImageInfo(relocation.oat_index);
+    relocation.offset += image_info.GetBinSlotOffset(bin_type);
+  }
 }
 
 std::pair<size_t, dchecked_vector<ImageSection>>
@@ -2655,11 +2709,17 @@ ImageWriter::ImageInfo::CreateImageSections() const {
       ImageSection(GetBinSlotOffset(Bin::kRuntimeMethod), GetBinSlotSize(Bin::kRuntimeMethod));
 
   /*
+   * JNI Stub Methods section
+   */
+  sections[ImageHeader::kSectionJniStubMethods] =
+      ImageSection(GetBinSlotOffset(Bin::kJniStubMethod), GetBinSlotSize(Bin::kJniStubMethod));
+
+  /*
    * Interned Strings section
    */
 
   // Round up to the alignment the string table expects. See HashSet::WriteToMemory.
-  size_t cur_pos = RoundUp(sections[ImageHeader::kSectionRuntimeMethods].End(), sizeof(uint64_t));
+  size_t cur_pos = RoundUp(sections[ImageHeader::kSectionJniStubMethods].End(), sizeof(uint64_t));
 
   const ImageSection& interned_strings_section =
       sections[ImageHeader::kSectionInternedStrings] =
@@ -2808,7 +2868,7 @@ void ImageWriter::CreateHeader(size_t oat_index, size_t component_count) {
       boot_image_size_,
       boot_image_components,
       boot_image_checksums,
-      static_cast<uint32_t>(target_ptr_size_));
+      target_ptr_size_);
 }
 
 ArtMethod* ImageWriter::GetImageMethodAddress(ArtMethod* method) {
@@ -3027,6 +3087,21 @@ void ImageWriter::CopyAndFixupNativeData(size_t oat_index) {
       // The ClassSet was inserted at the beginning.
       CHECK_EQ(temp_class_table.classes_[0].size(), table.size());
     }
+  }
+}
+
+void ImageWriter::CopyAndFixupJniStubMethods(size_t oat_index) {
+  const ImageInfo& image_info = GetImageInfo(oat_index);
+  // Copy method's address to JniStubMethods section.
+  for (auto& pair : jni_stub_map_) {
+    JniStubMethodRelocation& relocation = pair.second.second;
+    // Only work with JNI stubs that are in the current oat file.
+    if (relocation.oat_index != oat_index) {
+      continue;
+    }
+    void** address = reinterpret_cast<void**>(image_info.image_.Begin() + relocation.offset);
+    ArtMethod* method = pair.second.first;
+    CopyAndFixupPointer(address, method);
   }
 }
 
@@ -3441,35 +3516,52 @@ const uint8_t* ImageWriter::GetQuickCode(ArtMethod* method, const ImageInfo& ima
   return quick_code;
 }
 
+static inline uint32_t ResetNterpFastPathFlags(
+    uint32_t access_flags, ArtMethod* orig, InstructionSet isa)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  DCHECK(orig != nullptr);
+  DCHECK(!orig->IsProxyMethod());  // `UnstartedRuntime` does not support creating proxy classes.
+  DCHECK(!orig->IsRuntimeMethod());
+
+  // Clear old nterp fast path flags.
+  access_flags = ArtMethod::ClearNterpFastPathFlags(access_flags);
+
+  // Check if nterp fast paths are available on the target ISA.
+  std::string_view shorty = orig->GetShortyView();  // Use orig, copy's class not yet ready.
+  uint32_t new_nterp_flags = GetNterpFastPathFlags(shorty, access_flags, isa);
+
+  // Add the new nterp fast path flags, if any.
+  return access_flags | new_nterp_flags;
+}
+
 void ImageWriter::CopyAndFixupMethod(ArtMethod* orig,
                                      ArtMethod* copy,
                                      size_t oat_index) {
-  if (orig->IsAbstract()) {
-    // Ignore the single-implementation info for abstract method.
-    // Do this on orig instead of copy, otherwise there is a crash due to methods
-    // are copied before classes.
-    // TODO: handle fixup of single-implementation method for abstract method.
-    orig->SetHasSingleImplementation(false);
-    orig->SetSingleImplementation(
-        nullptr, Runtime::Current()->GetClassLinker()->GetImagePointerSize());
-  }
-
-  if (!orig->IsRuntimeMethod()) {
-    // If we're compiling a boot image and we have a profile, set methods as
-    // being shared memory (to avoid dirtying them with hotness counter). We
-    // expect important methods to be AOT, and non-important methods to be run
-    // in the interpreter.
-    if (CompilerFilter::DependsOnProfile(compiler_options_.GetCompilerFilter()) &&
-        (compiler_options_.IsBootImage() || compiler_options_.IsBootImageExtension())) {
-      orig->SetMemorySharedMethod();
-    }
-  }
-
   memcpy(copy, orig, ArtMethod::Size(target_ptr_size_));
 
   CopyAndFixupReference(copy->GetDeclaringClassAddressWithoutBarrier(),
                         orig->GetDeclaringClassUnchecked<kWithoutReadBarrier>());
-  ResetNterpFastPathFlags(copy, orig);
+
+  if (!orig->IsRuntimeMethod()) {
+    uint32_t access_flags = orig->GetAccessFlags();
+    if (ArtMethod::IsAbstract(access_flags)) {
+      // Ignore the single-implementation info for abstract method.
+      // TODO: handle fixup of single-implementation method for abstract method.
+      access_flags = ArtMethod::SetHasSingleImplementation(access_flags, /*single_impl=*/ false);
+      copy->SetSingleImplementation(nullptr, target_ptr_size_);
+    } else if (mark_memory_shared_methods_ && LIKELY(!ArtMethod::IsIntrinsic(access_flags))) {
+      access_flags = ArtMethod::SetMemorySharedMethod(access_flags);
+      copy->SetHotCounter();
+    }
+
+    InstructionSet isa = compiler_options_.GetInstructionSet();
+    if (isa != kRuntimeISA) {
+      access_flags = ResetNterpFastPathFlags(access_flags, orig, isa);
+    } else {
+      DCHECK_EQ(access_flags, ResetNterpFastPathFlags(access_flags, orig, isa));
+    }
+    copy->SetAccessFlags(access_flags);
+  }
 
   // OatWriter replaces the code_ with an offset value. Here we re-adjust to a pointer relative to
   // oat_begin_
@@ -3514,6 +3606,18 @@ void ImageWriter::CopyAndFixupMethod(ArtMethod* orig,
 
       // JNI entrypoint:
       if (orig->IsNative()) {
+        // Find boot JNI stub for those methods that skipped AOT compilation and don't need
+        // clinit check.
+        bool still_needs_clinit_check = orig->StillNeedsClinitCheck<kWithoutReadBarrier>();
+        if (!still_needs_clinit_check &&
+            !compiler_options_.IsBootImage() &&
+            quick_code == GetOatAddress(StubType::kQuickGenericJNITrampoline)) {
+          ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+          const void* boot_jni_stub = class_linker->FindBootJniStub(orig);
+          if (boot_jni_stub != nullptr) {
+            quick_code = boot_jni_stub;
+          }
+        }
         // The native method's pointer is set to a stub to lookup via dlsym.
         // Note this is not the code_ pointer, that is handled above.
         StubType stub_type = orig->IsCriticalNative() ? StubType::kJNIDlsymLookupCriticalTrampoline
@@ -3580,7 +3684,6 @@ ImageWriter::Bin ImageWriter::BinTypeForNativeRelocationType(NativeObjectRelocat
     case NativeObjectRelocationType::kGcRootPointer:
       return Bin::kMetadata;
   }
-  UNREACHABLE();
 }
 
 size_t ImageWriter::GetOatIndex(mirror::Object* obj) const {
@@ -3678,12 +3781,20 @@ ImageWriter::ImageWriter(const CompilerOptions& compiler_options,
                          jobject class_loader,
                          const std::vector<std::string>* dirty_image_objects)
     : compiler_options_(compiler_options),
+      target_ptr_size_(InstructionSetPointerSize(compiler_options.GetInstructionSet())),
+      // If we're compiling a boot image and we have a profile, set methods as being shared
+      // memory (to avoid dirtying them with hotness counter). We expect important methods
+      // to be AOT, and non-important methods to be run in the interpreter.
+      mark_memory_shared_methods_(
+          CompilerFilter::DependsOnProfile(compiler_options_.GetCompilerFilter()) &&
+              (compiler_options_.IsBootImage() || compiler_options_.IsBootImageExtension())),
       boot_image_begin_(Runtime::Current()->GetHeap()->GetBootImagesStartAddress()),
       boot_image_size_(Runtime::Current()->GetHeap()->GetBootImagesSize()),
       global_image_begin_(reinterpret_cast<uint8_t*>(image_begin)),
       image_objects_offset_begin_(0),
-      target_ptr_size_(InstructionSetPointerSize(compiler_options.GetInstructionSet())),
       image_infos_(oat_filenames.size()),
+      jni_stub_map_(JniStubKeyHash(compiler_options.GetInstructionSet()),
+                    JniStubKeyEquals(compiler_options.GetInstructionSet())),
       dirty_methods_(0u),
       clean_methods_(0u),
       app_class_loader_(class_loader),
@@ -3761,33 +3872,6 @@ void ImageWriter::CopyAndFixupPointer(
 template <typename ValueType>
 void ImageWriter::CopyAndFixupPointer(void* object, MemberOffset offset, ValueType src_value) {
   return CopyAndFixupPointer(object, offset, src_value, target_ptr_size_);
-}
-
-void ImageWriter::ResetNterpFastPathFlags(ArtMethod* copy, ArtMethod* orig) {
-  DCHECK(copy != nullptr);
-  DCHECK(orig != nullptr);
-  if (orig->IsRuntimeMethod() || orig->IsProxyMethod()) {
-    return;  // !IsRuntimeMethod() and !IsProxyMethod() for GetShortyView()
-  }
-
-  // Clear old nterp fast path flags.
-  if (copy->HasNterpEntryPointFastPathFlag()) {
-    copy->ClearNterpEntryPointFastPathFlag();  // Flag has other uses, clear it conditionally.
-  }
-  copy->ClearNterpInvokeFastPathFlag();
-
-  // Check if nterp fast paths available on target ISA.
-  std::string_view shorty = orig->GetShortyView();  // Use orig, copy's class not yet ready.
-  uint32_t new_nterp_flags =
-      GetNterpFastPathFlags(shorty, copy->GetAccessFlags(), compiler_options_.GetInstructionSet());
-
-  // Set new nterp fast path flags, if approporiate.
-  if ((new_nterp_flags & kAccNterpEntryPointFastPathFlag) != 0) {
-    copy->SetNterpEntryPointFastPathFlag();
-  }
-  if ((new_nterp_flags & kAccNterpInvokeFastPathFlag) != 0) {
-    copy->SetNterpInvokeFastPathFlag();
-  }
 }
 
 }  // namespace linker

@@ -17,21 +17,13 @@
 #include <sys/capability.h>
 #include <sys/resource.h>
 #include <sys/types.h>
-#include <sys/wait.h>
-#include <unistd.h>
 
-#include <csignal>
-#include <filesystem>
-#include <functional>
 #include <string>
-#include <utility>
 
 #include "android-base/file.h"
 #include "android-base/logging.h"
-#include "android-base/scopeguard.h"
 #include "android-base/strings.h"
 #include "base/common_art_test.h"
-#include "base/file_utils.h"
 #include "base/globals.h"
 #include "base/macros.h"
 #include "base/os.h"
@@ -40,16 +32,16 @@
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "system/thread_defs.h"
+#include "testing.h"
 
 #ifdef ART_TARGET_ANDROID
 #include "android-modules-utils/sdk_level.h"
 #endif
 
 namespace art {
+namespace tools {
 namespace {
 
-using ::android::base::make_scope_guard;
-using ::android::base::ScopeGuard;
 using ::android::base::Split;
 using ::testing::Contains;
 using ::testing::ElementsAre;
@@ -58,54 +50,6 @@ using ::testing::Not;
 
 constexpr uid_t kRoot = 0;
 constexpr uid_t kNobody = 9999;
-
-// This test executes a few Linux system commands such as "ls", which are linked against system
-// libraries. In many ART gtests we set LD_LIBRARY_PATH to make the test binaries link to libraries
-// from the ART module first, and if that setting is propagated to the system commands they may also
-// try to link to those libraries instead of the system ones they are built against. This is
-// particularly noticeable when 32-bit tests run on a 64-bit system. Hence we need to set
-// LD_LIBRARY_PATH to an empty string here.
-// TODO(b/247108425): Remove this when ART gtests no longer use LD_LIBRARY_PATH.
-constexpr const char* kEmptyLdLibraryPath = "--env=LD_LIBRARY_PATH=";
-
-std::string GetArtBin(const std::string& name) {
-  return ART_FORMAT("{}/bin/{}", GetArtRoot(), name);
-}
-
-std::string GetBin(const std::string& name) {
-  return ART_FORMAT("{}/bin/{}", GetAndroidRoot(), name);
-}
-
-// Executes the command, waits for it to finish, and keeps it in a waitable state until the current
-// scope exits.
-std::pair<pid_t, ScopeGuard<std::function<void()>>> ScopedExecAndWait(
-    std::vector<std::string>& args) {
-  std::vector<char*> execv_args;
-  execv_args.reserve(args.size() + 1);
-  for (std::string& arg : args) {
-    execv_args.push_back(arg.data());
-  }
-  execv_args.push_back(nullptr);
-
-  pid_t pid = fork();
-  if (pid == 0) {
-    execv(execv_args[0], execv_args.data());
-    UNREACHABLE();
-  } else if (pid > 0) {
-    siginfo_t info;
-    CHECK_EQ(TEMP_FAILURE_RETRY(waitid(P_PID, pid, &info, WEXITED | WNOWAIT)), 0);
-    CHECK_EQ(info.si_code, CLD_EXITED);
-    CHECK_EQ(info.si_status, 0);
-    std::function<void()> cleanup([=] {
-      siginfo_t info;
-      CHECK_EQ(TEMP_FAILURE_RETRY(waitid(P_PID, pid, &info, WEXITED)), 0);
-    });
-    return std::make_pair(pid, make_scope_guard(std::move(cleanup)));
-  } else {
-    LOG(FATAL) << "Failed to call fork";
-    UNREACHABLE();
-  }
-}
 
 // Grants the current process the given root capability.
 void SetCap(cap_flag_t flag, cap_value_t value) {
@@ -161,21 +105,19 @@ TEST_F(ArtExecTest, SetTaskProfiles) {
 
   std::vector<std::string> args{art_exec_bin_,
                                 "--set-task-profile=ProcessCapacityHigh",
-                                kEmptyLdLibraryPath,
                                 "--",
                                 GetBin("sh"),
                                 "-c",
                                 "cat /proc/self/cgroup > " + filename};
-  auto [pid, scope_guard] = ScopedExecAndWait(args);
+  auto [pid, scope_guard] = ScopedExec(args, /*wait=*/true);
   std::string cgroup;
   ASSERT_TRUE(android::base::ReadFileToString(filename, &cgroup));
   EXPECT_THAT(cgroup, HasSubstr(":cpuset:/foreground\n"));
 }
 
 TEST_F(ArtExecTest, SetPriority) {
-  std::vector<std::string> args{
-      art_exec_bin_, "--set-priority=background", kEmptyLdLibraryPath, "--", GetBin("true")};
-  auto [pid, scope_guard] = ScopedExecAndWait(args);
+  std::vector<std::string> args{art_exec_bin_, "--set-priority=background", "--", GetBin("true")};
+  auto [pid, scope_guard] = ScopedExec(args, /*wait=*/true);
   EXPECT_EQ(getpriority(PRIO_PROCESS, pid), ANDROID_PRIORITY_BACKGROUND);
 }
 
@@ -190,15 +132,14 @@ TEST_F(ArtExecTest, DropCapabilities) {
   // Make sure the test is set up correctly (i.e., the child process should normally have the
   // inherited root capability: CAP_FOWNER).
   {
-    std::vector<std::string> args{art_exec_bin_, kEmptyLdLibraryPath, "--", GetBin("true")};
-    auto [pid, scope_guard] = ScopedExecAndWait(args);
+    std::vector<std::string> args{art_exec_bin_, "--", GetBin("true")};
+    auto [pid, scope_guard] = ScopedExec(args, /*wait=*/true);
     ASSERT_TRUE(GetCap(pid, CAP_EFFECTIVE, CAP_FOWNER));
   }
 
   {
-    std::vector<std::string> args{
-        art_exec_bin_, "--drop-capabilities", kEmptyLdLibraryPath, "--", GetBin("true")};
-    auto [pid, scope_guard] = ScopedExecAndWait(args);
+    std::vector<std::string> args{art_exec_bin_, "--drop-capabilities", "--", GetBin("true")};
+    auto [pid, scope_guard] = ScopedExec(args, /*wait=*/true);
     EXPECT_FALSE(GetCap(pid, CAP_EFFECTIVE, CAP_FOWNER));
   }
 }
@@ -217,7 +158,6 @@ TEST_F(ArtExecTest, CloseFds) {
 
   std::vector<std::string> args{art_exec_bin_,
                                 ART_FORMAT("--keep-fds={}:{}", file3->Fd(), file2->Fd()),
-                                kEmptyLdLibraryPath,
                                 "--",
                                 GetBin("sh"),
                                 "-c",
@@ -231,7 +171,7 @@ TEST_F(ArtExecTest, CloseFds) {
                                            file3->Fd(),
                                            filename)};
 
-  ScopedExecAndWait(args);
+  ScopedExec(args, /*wait=*/true);
 
   std::string open_fds;
   ASSERT_TRUE(android::base::ReadFileToString(filename, &open_fds));
@@ -245,15 +185,10 @@ TEST_F(ArtExecTest, Env) {
   ScratchFile scratch_file(new File(mkstemp(filename.data()), filename, /*check_usage=*/false));
   ASSERT_GE(scratch_file.GetFd(), 0);
 
-  std::vector<std::string> args{art_exec_bin_,
-                                "--env=FOO=BAR",
-                                kEmptyLdLibraryPath,
-                                "--",
-                                GetBin("sh"),
-                                "-c",
-                                "env > " + filename};
+  std::vector<std::string> args{
+      art_exec_bin_, "--env=FOO=BAR", "--", GetBin("sh"), "-c", "env > " + filename};
 
-  ScopedExecAndWait(args);
+  ScopedExec(args, /*wait=*/true);
 
   std::string envs;
   ASSERT_TRUE(android::base::ReadFileToString(filename, &envs));
@@ -261,5 +196,27 @@ TEST_F(ArtExecTest, Env) {
   EXPECT_THAT(Split(envs, "\n"), Contains("FOO=BAR"));
 }
 
+TEST_F(ArtExecTest, ProcessNameSuffix) {
+  std::string filename = "/data/local/tmp/art-exec-test-XXXXXX";
+  ScratchFile scratch_file(new File(mkstemp(filename.data()), filename, /*check_usage=*/false));
+  ASSERT_GE(scratch_file.GetFd(), 0);
+
+  std::vector<std::string> args{art_exec_bin_,
+                                "--process-name-suffix=my suffix",
+                                "--",
+                                GetBin("toybox"),
+                                "cp",
+                                "/proc/self/cmdline",
+                                filename};
+
+  ScopedExec(args, /*wait=*/true);
+
+  std::string cmdline;
+  ASSERT_TRUE(android::base::ReadFileToString(filename, &cmdline));
+
+  EXPECT_THAT(cmdline, HasSubstr("toybox (my suffix)\0"));
+}
+
 }  // namespace
+}  // namespace tools
 }  // namespace art

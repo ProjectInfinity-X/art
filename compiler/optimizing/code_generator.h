@@ -24,15 +24,17 @@
 #include "base/array_ref.h"
 #include "base/bit_field.h"
 #include "base/bit_utils.h"
-#include "base/enums.h"
 #include "base/globals.h"
 #include "base/macros.h"
 #include "base/memory_region.h"
+#include "base/pointer_size.h"
 #include "class_root.h"
+#include "dex/proto_reference.h"
 #include "dex/string_reference.h"
 #include "dex/type_reference.h"
 #include "graph_visualizer.h"
 #include "locations.h"
+#include "mirror/method_type.h"
 #include "nodes.h"
 #include "oat/oat_quick_method_header.h"
 #include "optimizing_compiler_stats.h"
@@ -59,15 +61,15 @@ static int32_t constexpr kPrimIntMax = 0x7fffffff;
 // Maximum value for a primitive long.
 static int64_t constexpr kPrimLongMax = INT64_C(0x7fffffffffffffff);
 
-constexpr size_t status_lsb_position = SubtypeCheckBits::BitStructSizeOf();
-constexpr size_t status_byte_offset =
-    mirror::Class::StatusOffset().SizeValue() + (status_lsb_position / kBitsPerByte);
-constexpr uint32_t shifted_visibly_initialized_value =
-    enum_cast<uint32_t>(ClassStatus::kVisiblyInitialized) << (status_lsb_position % kBitsPerByte);
-constexpr uint32_t shifted_initializing_value =
-    enum_cast<uint32_t>(ClassStatus::kInitializing) << (status_lsb_position % kBitsPerByte);
-constexpr uint32_t shifted_initialized_value =
-    enum_cast<uint32_t>(ClassStatus::kInitialized) << (status_lsb_position % kBitsPerByte);
+constexpr size_t kClassStatusLsbPosition = SubtypeCheckBits::BitStructSizeOf();
+constexpr size_t kClassStatusByteOffset =
+    mirror::Class::StatusOffset().SizeValue() + (kClassStatusLsbPosition / kBitsPerByte);
+constexpr uint32_t kShiftedVisiblyInitializedValue = enum_cast<uint32_t>(
+    ClassStatus::kVisiblyInitialized) << (kClassStatusLsbPosition % kBitsPerByte);
+constexpr uint32_t kShiftedInitializingValue =
+    enum_cast<uint32_t>(ClassStatus::kInitializing) << (kClassStatusLsbPosition % kBitsPerByte);
+constexpr uint32_t kShiftedInitializedValue =
+    enum_cast<uint32_t>(ClassStatus::kInitialized) << (kClassStatusLsbPosition % kBitsPerByte);
 
 class Assembler;
 class CodeGenerationData;
@@ -461,16 +463,18 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
                          DataType::Type type2);
 
   bool InstanceOfNeedsReadBarrier(HInstanceOf* instance_of) {
-    // Used only for kExactCheck, kAbstractClassCheck, kClassHierarchyCheck and kArrayObjectCheck.
+    // Used only for `kExactCheck`, `kAbstractClassCheck`, `kClassHierarchyCheck`,
+    // `kArrayObjectCheck` and `kInterfaceCheck`.
     DCHECK(instance_of->GetTypeCheckKind() == TypeCheckKind::kExactCheck ||
            instance_of->GetTypeCheckKind() == TypeCheckKind::kAbstractClassCheck ||
            instance_of->GetTypeCheckKind() == TypeCheckKind::kClassHierarchyCheck ||
-           instance_of->GetTypeCheckKind() == TypeCheckKind::kArrayObjectCheck)
+           instance_of->GetTypeCheckKind() == TypeCheckKind::kArrayObjectCheck ||
+           instance_of->GetTypeCheckKind() == TypeCheckKind::kInterfaceCheck)
         << instance_of->GetTypeCheckKind();
-    // If the target class is in the boot image, it's non-moveable and it doesn't matter
+    // If the target class is in the boot or app image, it's non-moveable and it doesn't matter
     // if we compare it with a from-space or to-space reference, the result is the same.
     // It's OK to traverse a class hierarchy jumping between from-space and to-space.
-    return EmitReadBarrier() && !instance_of->GetTargetClass()->IsInBootImage();
+    return EmitReadBarrier() && !instance_of->GetTargetClass()->IsInImage();
   }
 
   ReadBarrierOption ReadBarrierOptionForInstanceOf(HInstanceOf* instance_of) {
@@ -485,7 +489,7 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
       case TypeCheckKind::kArrayObjectCheck:
       case TypeCheckKind::kInterfaceCheck: {
         bool needs_read_barrier =
-            EmitReadBarrier() && !check_cast->GetTargetClass()->IsInBootImage();
+            EmitReadBarrier() && !check_cast->GetTargetClass()->IsInImage();
         // We do not emit read barriers for HCheckCast, so we can get false negatives
         // and the slow path shall re-check and simply return if the cast is actually OK.
         return !needs_read_barrier;
@@ -597,7 +601,7 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
 
   template <typename CriticalNativeCallingConventionVisitor,
             size_t kNativeStackAlignment,
-            size_t GetCriticalNativeDirectCallFrameSize(const char* shorty, uint32_t shorty_len)>
+            size_t GetCriticalNativeDirectCallFrameSize(std::string_view shorty)>
   size_t PrepareCriticalNativeCall(HInvokeStaticOrDirect* invoke) {
       DCHECK(!invoke->GetLocations()->Intrinsified());
       CriticalNativeCallingConventionVisitor calling_convention_visitor(
@@ -607,9 +611,8 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
       size_t out_frame_size =
           RoundUp(calling_convention_visitor.GetStackOffset(), kNativeStackAlignment);
       if (kIsDebugBuild) {
-        uint32_t shorty_len;
-        const char* shorty = GetCriticalNativeShorty(invoke, &shorty_len);
-        CHECK_EQ(GetCriticalNativeDirectCallFrameSize(shorty, shorty_len), out_frame_size);
+        std::string_view shorty = GetCriticalNativeShorty(invoke);
+        CHECK_EQ(GetCriticalNativeDirectCallFrameSize(shorty), out_frame_size);
       }
       if (out_frame_size != 0u) {
         FinishCriticalNativeFrameSetup(out_frame_size, &parallel_move);
@@ -736,15 +739,15 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
  protected:
   // Patch info used for recording locations of required linker patches and their targets,
   // i.e. target method, string, type or code identified by their dex file and index,
-  // or .data.bimg.rel.ro entries identified by the boot image offset.
+  // or boot image .data.img.rel.ro entries identified by the boot image offset.
   template <typename LabelType>
   struct PatchInfo {
     PatchInfo(const DexFile* dex_file, uint32_t off_or_idx)
         : target_dex_file(dex_file), offset_or_index(off_or_idx), label() { }
 
-    // Target dex file or null for .data.bmig.rel.ro patches.
+    // Target dex file or null for boot image .data.img.rel.ro patches.
     const DexFile* target_dex_file;
-    // Either the boot image offset (to write to .data.bmig.rel.ro) or string/type/method index.
+    // Either the boot image offset (to write to .data.img.rel.ro) or string/type/method index.
     uint32_t offset_or_index;
     // Label for the instruction to patch.
     LabelType label;
@@ -833,6 +836,9 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
   uint64_t GetJitStringRootIndex(StringReference string_reference);
   void ReserveJitClassRoot(TypeReference type_reference, Handle<mirror::Class> klass);
   uint64_t GetJitClassRootIndex(TypeReference type_reference);
+  void ReserveJitMethodTypeRoot(ProtoReference proto_reference,
+                                Handle<mirror::MethodType> method_type);
+  uint64_t GetJitMethodTypeRootIndex(ProtoReference proto_reference);
 
   // Emit the patches assocatied with JIT roots. Only applies to JIT compiled code.
   virtual void EmitJitRootPatches(uint8_t* code, const uint8_t* roots_data);
@@ -882,7 +888,7 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
 
   void FinishCriticalNativeFrameSetup(size_t out_frame_size, /*inout*/HParallelMove* parallel_move);
 
-  static const char* GetCriticalNativeShorty(HInvokeStaticOrDirect* invoke, uint32_t* shorty_len);
+  static std::string_view GetCriticalNativeShorty(HInvokeStaticOrDirect* invoke);
 
   OptimizingCompilerStats* stats_;
 

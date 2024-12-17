@@ -21,6 +21,7 @@ package {
     // to get the below license kinds:
     //   SPDX-license-identifier-Apache-2.0
     default_applicable_licenses: ["art_license"],
+    default_team: "trendy_team_art_performance",
 }
 
 cc_defaults {
@@ -34,7 +35,6 @@ cc_defaults {
         "base/arena_bit_vector.cc",
         "base/bit_vector.cc",
         "base/compiler_filter.cc",
-        "base/enums.cc",
         "base/file_magic.cc",
         "base/file_utils.cc",
         "base/flags.cc",
@@ -48,6 +48,7 @@ cc_defaults {
         // "base/mem_map_fuchsia.cc", put in target when fuchsia supported by soong
         "base/metrics/metrics_common.cc",
         "base/os_linux.cc",
+        "base/pointer_size.cc",
         "base/runtime_debug.cc",
         "base/scoped_arena_allocator.cc",
         "base/scoped_flock.cc",
@@ -135,6 +136,28 @@ cc_defaults {
         },
         darwin: {
             enabled: true, // for libdexfile.
+            // TODO(b/350967139): Move art-aconfig-flags-lib to the top level
+            // when aconfig supports windows. Until then it's harder to use
+            // flags in code that needs to build for them, e.g. libartbase,
+            // libdexfile, and dexdump.
+            static_libs: [
+                "art-aconfig-flags-lib",
+            ],
+            export_static_lib_headers: [
+                "art-aconfig-flags-lib",
+            ],
+        },
+        linux: {
+            // TODO(b/350967139): Move art-aconfig-flags-lib to the top level
+            // when aconfig supports windows. Until then it's harder to use
+            // flags in code that needs to build for them, e.g. libartbase,
+            // libdexfile, and dexdump.
+            static_libs: [
+                "art-aconfig-flags-lib",
+            ],
+            export_static_lib_headers: [
+                "art-aconfig-flags-lib",
+            ],
         },
     },
     generated_sources: ["art_libartbase_operator_srcs"],
@@ -260,13 +283,11 @@ art_cc_defaults {
     ],
     static: {
         whole_static_libs: [
-            "libc++fs",
             "libcap",
         ],
     },
     shared: {
         static_libs: [
-            "libc++fs",
             "libcap",
         ],
     },

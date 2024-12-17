@@ -26,7 +26,6 @@
 #include "base/mutex-inl.h"
 #include "base/sdk_version.h"
 #include "base/stl_util.h"
-#include "base/string_view_cpp20.h"
 #include "base/systrace.h"
 #include "check_jni.h"
 #include "dex/dex_file-inl.h"
@@ -620,7 +619,7 @@ bool JavaVMExt::ShouldTrace(ArtMethod* method) {
     return false;
   }
   // Perform checks based on class name.
-  std::string_view class_name(method->GetDeclaringClassDescriptor());
+  std::string_view class_name = method->GetDeclaringClassDescriptorView();
   if (!trace_.empty() && class_name.find(trace_) != std::string_view::npos) {
     return true;
   }
@@ -640,7 +639,7 @@ bool JavaVMExt::ShouldTrace(ArtMethod* method) {
       "Lorg/apache/harmony/",
   };
   for (size_t i = 0; i < arraysize(gBuiltInPrefixes); ++i) {
-    if (StartsWith(class_name, gBuiltInPrefixes[i])) {
+    if (class_name.starts_with(gBuiltInPrefixes[i])) {
       return false;
     }
   }
@@ -958,12 +957,12 @@ bool JavaVMExt::LoadNativeLibrary(JNIEnv* env,
     if (class_linker->IsBootClassLoader(loader)) {
       loader = nullptr;
       class_loader = nullptr;
-      if (caller_class != nullptr) {
-        ObjPtr<mirror::Class> caller = soa.Decode<mirror::Class>(caller_class);
-        ObjPtr<mirror::DexCache> dex_cache = caller->GetDexCache();
-        if (dex_cache != nullptr) {
-          caller_location = dex_cache->GetLocation()->ToModifiedUtf8();
-        }
+    }
+    if (caller_class != nullptr) {
+      ObjPtr<mirror::Class> caller = soa.Decode<mirror::Class>(caller_class);
+      ObjPtr<mirror::DexCache> dex_cache = caller->GetDexCache();
+      if (dex_cache != nullptr) {
+        caller_location = dex_cache->GetLocation()->ToModifiedUtf8();
       }
     }
 

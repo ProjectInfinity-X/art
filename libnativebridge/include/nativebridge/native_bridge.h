@@ -95,6 +95,11 @@ void* NativeBridgeGetTrampoline2(void* handle,
                                  uint32_t len,
                                  enum JNICallType jni_call_type);
 
+void* NativeBridgeGetTrampolineForFunctionPointer(const void* method,
+                                                  const char* shorty,
+                                                  uint32_t len,
+                                                  enum JNICallType jni_call_type);
+
 // True if native library paths are valid and is for an ABI that is supported by native bridge.
 // The *libpath* must point to a library.
 //
@@ -140,18 +145,6 @@ struct native_bridge_namespace_t;
 // Starting with v3, NativeBridge has two scenarios: with/without namespace.
 // Use NativeBridgeIsSupported() instead in non-namespace scenario.
 bool NativeBridgeIsPathSupported(const char* path);
-
-// Initializes anonymous namespace.
-// NativeBridge's peer of android_init_anonymous_namespace() of dynamic linker.
-//
-// The anonymous namespace is used in the case when a NativeBridge implementation
-// cannot identify the caller of dlopen/dlsym which happens for the code not loaded
-// by dynamic linker; for example calls from the mono-compiled code.
-//
-// Starting with v3, NativeBridge has two scenarios: with/without namespace.
-// Should not use in non-namespace scenario.
-bool NativeBridgeInitAnonymousNamespace(const char* public_ns_sonames,
-                                        const char* anon_ns_library_path);
 
 // Create new namespace in which native libraries will be loaded.
 // NativeBridge's peer of android_create_namespace() of dynamic linker.
@@ -309,23 +302,8 @@ struct NativeBridgeCallbacks {
   // Use isSupported instead in non-namespace scenario.
   bool (*isPathSupported)(const char* library_path);
 
-  // Initializes anonymous namespace at native bridge side.
-  // NativeBridge's peer of android_init_anonymous_namespace() of dynamic linker.
-  //
-  // The anonymous namespace is used in the case when a NativeBridge implementation
-  // cannot identify the caller of dlopen/dlsym which happens for the code not loaded
-  // by dynamic linker; for example calls from the mono-compiled code.
-  //
-  // Parameters:
-  //   public_ns_sonames [IN] the name of "public" libraries.
-  //   anon_ns_library_path [IN] the library search path of (anonymous) namespace.
-  // Returns:
-  //   true if the pass is ok.
-  //   Otherwise, false.
-  //
-  // Starting with v3, NativeBridge has two scenarios: with/without namespace.
-  // Should not use in non-namespace scenario.
-  bool (*initAnonymousNamespace)(const char* public_ns_sonames, const char* anon_ns_library_path);
+  // No longer used.
+  bool (*unused_initAnonymousNamespace)(const char*, const char*);
 
   // Create new namespace in which native libraries will be loaded.
   // NativeBridge's peer of android_create_namespace() of dynamic linker.
@@ -421,6 +399,20 @@ struct NativeBridgeCallbacks {
                                         const char* shorty,
                                         uint32_t len,
                                         enum JNICallType jni_call_type);
+
+  // Get a native bridge trampoline for specified native method implementation pointer.
+  //
+  // Parameters:
+  //   method [IN] pointer to method implementation (ususally registered via call to
+  //   RegisterNatives).
+  //   shorty [IN] short descriptor of native method len [IN] length of shorty
+  //   jni_call_type [IN] the type of JNI call
+  // Returns:
+  //   address of trampoline if successful, otherwise NULL
+  void* (*getTrampolineForFunctionPointer)(const void* method,
+                                           const char* shorty,
+                                           uint32_t len,
+                                           enum JNICallType jni_call_type);
 };
 
 // Runtime interfaces to native bridge.

@@ -16,8 +16,9 @@
 
 #include "jni_internal.h"
 
-#include <cstdarg>
 #include <log/log.h>
+
+#include <cstdarg>
 #include <memory>
 #include <utility>
 
@@ -26,10 +27,10 @@
 #include "base/allocator.h"
 #include "base/atomic.h"
 #include "base/casts.h"
-#include "base/enums.h"
 #include "base/file_utils.h"
 #include "base/logging.h"  // For VLOG.
 #include "base/mutex.h"
+#include "base/pointer_size.h"
 #include "base/safe_map.h"
 #include "base/stl_util.h"
 #include "class_linker-inl.h"
@@ -37,10 +38,10 @@
 #include "dex/dex_file-inl.h"
 #include "dex/utf-inl.h"
 #include "fault_handler.h"
-#include "handle_scope.h"
-#include "hidden_api.h"
 #include "gc/accounting/card_table-inl.h"
 #include "gc_root.h"
+#include "handle_scope.h"
+#include "hidden_api.h"
 #include "indirect_reference_table-inl.h"
 #include "interpreter/interpreter.h"
 #include "java_vm_ext.h"
@@ -58,7 +59,9 @@
 #include "mirror/string-alloc-inl.h"
 #include "mirror/string-inl.h"
 #include "mirror/throwable.h"
+#include "nativebridge/native_bridge.h"
 #include "nativehelper/scoped_local_ref.h"
+#include "nativeloader/native_loader.h"
 #include "parsed_options.h"
 #include "reflection.h"
 #include "runtime.h"
@@ -2572,9 +2575,27 @@ class JNI {
     Handle<mirror::Class> c = hs.NewHandle(soa.Decode<mirror::Class>(java_class));
     if (UNLIKELY(method_count == 0)) {
       LOG(WARNING) << "JNI RegisterNativeMethods: attempt to register 0 native methods for "
-          << c->PrettyDescriptor();
+                   << c->PrettyDescriptor();
       return JNI_OK;
     }
+    ScopedLocalRef<jobject> jclass_loader(env, nullptr);
+    if (c->GetClassLoader() != nullptr) {
+      jclass_loader.reset(soa.Env()->AddLocalReference<jobject>(c->GetClassLoader()));
+    }
+
+    bool is_class_loader_namespace_natively_bridged = false;
+    {
+      // Making sure to release mutator_lock_ before proceeding.
+      // FindNativeLoaderNamespaceByClassLoader eventually acquires lock on g_namespaces_mutex
+      // which may cause a deadlock if another thread is waiting for mutator_lock_
+      // for IsSameObject call in libnativeloader's CreateClassLoaderNamespace (which happens
+      // under g_namespace_mutex lock)
+      ScopedThreadSuspension sts(soa.Self(), ThreadState::kNative);
+
+      is_class_loader_namespace_natively_bridged =
+          IsClassLoaderNamespaceNativelyBridged(env, jclass_loader.get());
+    }
+
     CHECK_NON_NULL_ARGUMENT_FN_NAME("RegisterNatives", methods, JNI_ERR);
     for (jint i = 0; i < method_count; ++i) {
       const char* name = methods[i].name;
@@ -2683,6 +2704,9 @@ class JNI {
         // TODO: make this a hard register error in the future.
       }
 
+      if (is_class_loader_namespace_natively_bridged) {
+        fnPtr = GenerateNativeBridgeTrampoline(fnPtr, m);
+      }
       const void* final_function_ptr = class_linker->RegisterNative(soa.Self(), m, fnPtr);
       UNUSED(final_function_ptr);
     }
@@ -2903,6 +2927,33 @@ class JNI {
     }
     DCHECK_EQ(sizeof(ElementT), array->GetClass()->GetComponentSize());
     return array;
+  }
+
+  static bool IsClassLoaderNamespaceNativelyBridged(JNIEnv* env, jobject jclass_loader) {
+#if defined(ART_TARGET_ANDROID)
+    android::NativeLoaderNamespace* ns =
+        android::FindNativeLoaderNamespaceByClassLoader(env, jclass_loader);
+    return ns != nullptr && android::IsNamespaceNativeBridged(ns);
+#else
+    UNUSED(env, jclass_loader);
+    return false;
+#endif
+  }
+
+  static const void* GenerateNativeBridgeTrampoline(const void* fn_ptr, ArtMethod* method)
+      REQUIRES_SHARED(Locks::mutator_lock_) {
+#if defined(ART_TARGET_ANDROID)
+    uint32_t shorty_length;
+    const char* shorty = method->GetShorty(&shorty_length);
+    android::JNICallType jni_call_type = method->IsCriticalNative() ?
+                                             android::JNICallType::kJNICallTypeCriticalNative :
+                                             android::JNICallType::kJNICallTypeRegular;
+    return NativeBridgeGetTrampolineForFunctionPointer(
+        fn_ptr, shorty, shorty_length, jni_call_type);
+#else
+    UNUSED(method);
+    return fn_ptr;
+#endif
   }
 
   template <typename ArrayT, typename ElementT, typename ArtArrayT>

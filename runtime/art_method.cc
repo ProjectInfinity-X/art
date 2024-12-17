@@ -23,7 +23,7 @@
 
 #include "arch/context.h"
 #include "art_method-inl.h"
-#include "base/enums.h"
+#include "base/pointer_size.h"
 #include "base/stl_util.h"
 #include "class_linker-inl.h"
 #include "class_root-inl.h"
@@ -38,6 +38,7 @@
 #include "gc/accounting/card_table-inl.h"
 #include "hidden_api.h"
 #include "interpreter/interpreter.h"
+#include "intrinsics_enum.h"
 #include "jit/jit.h"
 #include "jit/jit_code_cache.h"
 #include "jit/profiling_info.h"
@@ -187,12 +188,14 @@ void ArtMethod::ThrowInvocationTimeError(ObjPtr<mirror::Object> receiver) {
     // IllegalAccessError.
     DCHECK(IsAbstract());
     ObjPtr<mirror::Class> current = receiver->GetClass();
+    std::string_view name = GetNameView();
+    Signature signature = GetSignature();
     while (current != nullptr) {
       for (ArtMethod& method : current->GetDeclaredMethodsSlice(kRuntimePointerSize)) {
         ArtMethod* np_method = method.GetInterfaceMethodIfProxy(kRuntimePointerSize);
         if (!np_method->IsStatic() &&
-            np_method->GetNameView() == GetNameView() &&
-            np_method->GetSignature() == GetSignature()) {
+            np_method->GetNameView() == name &&
+            np_method->GetSignature() == signature) {
           if (!np_method->IsPublic()) {
             ThrowIllegalAccessErrorForImplementingMethod(receiver->GetClass(), np_method, this);
             return;
@@ -302,7 +305,7 @@ uint32_t ArtMethod::FindDexMethodIndexInOtherDexFile(const DexFile& other_dexfil
   if (dexfile == &other_dexfile) {
     return dex_method_idx;
   }
-  const char* mid_declaring_class_descriptor = dexfile->StringByTypeIdx(mid.class_idx_);
+  std::string_view mid_declaring_class_descriptor = dexfile->GetTypeDescriptorView(mid.class_idx_);
   const dex::TypeId* other_type_id = other_dexfile.FindTypeId(mid_declaring_class_descriptor);
   if (other_type_id != nullptr) {
     const dex::MethodId* other_mid = other_dexfile.FindMethodId(
@@ -340,9 +343,6 @@ uint32_t ArtMethod::FindCatchBlock(Handle<mirror::Class> exception_type,
       // removed by a pro-guard like tool.
       // Note: this is not RI behavior. RI would have failed when loading the class.
       self->ClearException();
-      // Delete any long jump context as this routine is called during a stack walk which will
-      // release its in use context at the end.
-      delete self->GetLongJumpContext();
       LOG(WARNING) << "Unresolved exception class when finding catch block: "
         << DescriptorToDot(GetTypeDescriptorFromTypeIdx(iter_type_idx));
     } else if (iter_exception_type->IsAssignableFrom(exception_type.Get())) {
@@ -487,9 +487,8 @@ static const OatFile::OatMethod FindOatMethodFromDexFileFor(ArtMethod* method, b
   const DexFile* dex_file = method->GetDexFile();
 
   // recreate the class_def_index from the descriptor.
-  std::string descriptor_storage;
   const dex::TypeId* declaring_class_type_id =
-      dex_file->FindTypeId(method->GetDeclaringClass()->GetDescriptor(&descriptor_storage));
+      dex_file->FindTypeId(method->GetDeclaringClassDescriptorView());
   CHECK(declaring_class_type_id != nullptr);
   dex::TypeIndex declaring_class_type_index = dex_file->GetIndexForTypeId(*declaring_class_type_id);
   const dex::ClassDef* declaring_class_type_def =
@@ -661,10 +660,12 @@ const OatQuickMethodHeader* ArtMethod::GetOatQuickMethodHeader(uintptr_t pc) {
           << ", jit= " << jit;
     }
     // We are running the GenericJNI stub. The entrypoint may point
-    // to different entrypoints or to a JIT-compiled JNI stub.
+    // to different entrypoints, to a JIT-compiled JNI stub, or to a shared boot
+    // image stub.
     DCHECK(class_linker->IsQuickGenericJniStub(existing_entry_point) ||
            class_linker->IsQuickResolutionStub(existing_entry_point) ||
-           (jit != nullptr && jit->GetCodeCache()->ContainsPc(existing_entry_point)))
+           (jit != nullptr && jit->GetCodeCache()->ContainsPc(existing_entry_point)) ||
+           (class_linker->FindBootJniStub(this) != nullptr))
         << " method: " << PrettyMethod()
         << " entrypoint: " << existing_entry_point
         << " size: " << OatQuickMethodHeader::FromEntryPoint(existing_entry_point)->GetCodeSize()
@@ -717,30 +718,15 @@ const void* ArtMethod::GetOatMethodQuickCode(PointerSize pointer_size) {
   return nullptr;
 }
 
-bool ArtMethod::HasAnyCompiledCode() {
-  if (IsNative() || !IsInvokable() || IsProxyMethod()) {
-    return false;
-  }
-
-  // Check whether the JIT has compiled it.
-  Runtime* runtime = Runtime::Current();
-  jit::Jit* jit = runtime->GetJit();
-  if (jit != nullptr && jit->GetCodeCache()->ContainsMethod(this)) {
-    return true;
-  }
-
-  // Check whether we have AOT code.
-  return GetOatMethodQuickCode(runtime->GetClassLinker()->GetImagePointerSize()) != nullptr;
-}
-
-void ArtMethod::SetIntrinsic(uint32_t intrinsic) {
+void ArtMethod::SetIntrinsic(Intrinsics intrinsic) {
   // Currently we only do intrinsics for static/final methods or methods of final
   // classes. We don't set kHasSingleImplementation for those methods.
   DCHECK(IsStatic() || IsFinal() || GetDeclaringClass()->IsFinal()) <<
       "Potential conflict with kAccSingleImplementation";
   static const int kAccFlagsShift = CTZ(kAccIntrinsicBits);
-  DCHECK_LE(intrinsic, kAccIntrinsicBits >> kAccFlagsShift);
-  uint32_t intrinsic_bits = intrinsic << kAccFlagsShift;
+  uint32_t intrinsic_u32 = enum_cast<uint32_t>(intrinsic);
+  DCHECK_LE(intrinsic_u32, kAccIntrinsicBits >> kAccFlagsShift);
+  uint32_t intrinsic_bits = intrinsic_u32 << kAccFlagsShift;
   uint32_t new_value = (GetAccessFlags() & ~kAccIntrinsicBits) | kAccIntrinsic | intrinsic_bits;
   if (kIsDebugBuild) {
     uint32_t java_flags = (GetAccessFlags() & kAccJavaFlagsMask);
@@ -811,16 +797,18 @@ void ArtMethod::CopyFrom(ArtMethod* src, PointerSize image_pointer_size) {
   const void* entry_point = GetEntryPointFromQuickCompiledCodePtrSize(image_pointer_size);
   if (runtime->UseJitCompilation()) {
     if (runtime->GetJit()->GetCodeCache()->ContainsPc(entry_point)) {
-      SetEntryPointFromQuickCompiledCodePtrSize(
-          src->IsNative() ? GetQuickGenericJniStub() : GetQuickToInterpreterBridge(),
-          image_pointer_size);
+      SetNativePointer(EntryPointFromQuickCompiledCodeOffset(image_pointer_size),
+                       src->IsNative() ? GetQuickGenericJniStub() : GetQuickToInterpreterBridge(),
+                       image_pointer_size);
     }
   }
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
   if (interpreter::IsNterpSupported() && class_linker->IsNterpEntryPoint(entry_point)) {
     // If the entrypoint is nterp, it's too early to check if the new method
     // will support it. So for simplicity, use the interpreter bridge.
-    SetEntryPointFromQuickCompiledCodePtrSize(GetQuickToInterpreterBridge(), image_pointer_size);
+    SetNativePointer(EntryPointFromQuickCompiledCodeOffset(image_pointer_size),
+                     GetQuickToInterpreterBridge(),
+                     image_pointer_size);
   }
 
   // Clear the data pointer, it will be set if needed by the caller.
@@ -862,8 +850,7 @@ std::string ArtMethod::PrettyMethod(ArtMethod* m, bool with_signature) {
 
 std::string ArtMethod::PrettyMethod(bool with_signature) {
   if (UNLIKELY(IsRuntimeMethod())) {
-    std::string result = GetDeclaringClassDescriptor();
-    result += '.';
+    std::string result = "<runtime method>.";
     result += GetName();
     // Do not add "<no signature>" even if `with_signature` is true.
     return result;

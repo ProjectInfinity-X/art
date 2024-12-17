@@ -26,6 +26,7 @@
 #include "class_linker-inl.h"
 #include "class_root-inl.h"
 #include "dex/dex_file-inl.h"
+#include "dex/dex_file_types.h"
 #include "dex/dex_instruction-inl.h"
 #include "jni/jni_internal.h"
 #include "jvalue-inl.h"
@@ -193,7 +194,7 @@ const AnnotationItem* SearchAnnotationSet(const DexFile& dex_file,
     const uint8_t* annotation = annotation_item->annotation_;
     uint32_t type_index = DecodeUnsignedLeb128(&annotation);
 
-    if (strcmp(descriptor, dex_file.StringByTypeIdx(dex::TypeIndex(type_index))) == 0) {
+    if (strcmp(descriptor, dex_file.GetTypeDescriptor(dex::TypeIndex(type_index))) == 0) {
       result = annotation_item;
       break;
     }
@@ -221,6 +222,8 @@ bool SkipAnnotationValue(const DexFile& dex_file, const uint8_t** annotation_ptr
     case DexFile::kDexAnnotationLong:
     case DexFile::kDexAnnotationFloat:
     case DexFile::kDexAnnotationDouble:
+    case DexFile::kDexAnnotationMethodType:
+    case DexFile::kDexAnnotationMethodHandle:
     case DexFile::kDexAnnotationString:
     case DexFile::kDexAnnotationType:
     case DexFile::kDexAnnotationMethod:
@@ -465,6 +468,11 @@ bool ProcessAnnotationValue(const ClassData& klass,
       primitive_type = Primitive::kPrimBoolean;
       width = 0;
       break;
+    case DexFile::kDexAnnotationMethodType:
+    case DexFile::kDexAnnotationMethodHandle:
+      // These annotations are unexpected here. Don't process them.
+      LOG(WARNING) << StringPrintf("Unexpected annotation of type 0x%02x", value_type);
+      return false;
     case DexFile::kDexAnnotationString: {
       uint32_t index = DexFile::ReadUnsignedInt(annotation, value_arg, false);
       if (result_style == DexFile::kAllRaw) {
@@ -495,7 +503,7 @@ bool ProcessAnnotationValue(const ClassData& klass,
         if (element_object == nullptr) {
           CHECK(self->IsExceptionPending());
           if (result_style == DexFile::kAllObjects) {
-            const char* msg = dex_file.StringByTypeIdx(type_index);
+            const char* msg = dex_file.GetTypeDescriptor(type_index);
             self->ThrowNewWrappedException("Ljava/lang/TypeNotPresentException;", msg);
             element_object = self->GetException();
             self->ClearException();
@@ -701,7 +709,7 @@ ObjPtr<mirror::Object> CreateAnnotationMember(const ClassData& klass,
   ScopedObjectAccessUnchecked soa(self);
   StackHandleScope<5> hs(self);
   uint32_t element_name_index = DecodeUnsignedLeb128(annotation);
-  const char* name = dex_file.StringDataByIdx(dex::StringIndex(element_name_index));
+  const char* name = dex_file.GetStringData(dex::StringIndex(element_name_index));
 
   PointerSize pointer_size = Runtime::Current()->GetClassLinker()->GetImagePointerSize();
   ArtMethod* annotation_method =
@@ -1286,13 +1294,34 @@ static bool IsMethodBuildAnnotationPresent(const DexFile& dex_file,
     }
     const uint8_t* annotation = annotation_item->annotation_;
     uint32_t type_index = DecodeUnsignedLeb128(&annotation);
-    const char* descriptor = dex_file.StringByTypeIdx(dex::TypeIndex(type_index));
+    const char* descriptor = dex_file.GetTypeDescriptor(dex::TypeIndex(type_index));
     if (strcmp(descriptor, annotation_descriptor) == 0) {
       DCheckNativeAnnotation(descriptor, annotation_class);
       return true;
     }
   }
   return false;
+}
+
+static uint32_t GetNativeMethodAnnotationAccessFlags(const DexFile& dex_file,
+                                                     const dex::AnnotationSetItem& annotation_set) {
+  uint32_t access_flags = 0u;
+  if (IsMethodBuildAnnotationPresent(
+          dex_file,
+          annotation_set,
+          "Ldalvik/annotation/optimization/FastNative;",
+          WellKnownClasses::dalvik_annotation_optimization_FastNative)) {
+    access_flags |= kAccFastNative;
+  }
+  if (IsMethodBuildAnnotationPresent(
+          dex_file,
+          annotation_set,
+          "Ldalvik/annotation/optimization/CriticalNative;",
+          WellKnownClasses::dalvik_annotation_optimization_CriticalNative)) {
+    access_flags |= kAccCriticalNative;
+  }
+  CHECK_NE(access_flags, kAccFastNative | kAccCriticalNative);
+  return access_flags;
 }
 
 uint32_t GetNativeMethodAnnotationAccessFlags(const DexFile& dex_file,
@@ -1303,23 +1332,22 @@ uint32_t GetNativeMethodAnnotationAccessFlags(const DexFile& dex_file,
   if (annotation_set == nullptr) {
     return 0u;
   }
-  uint32_t access_flags = 0u;
-  if (IsMethodBuildAnnotationPresent(
-          dex_file,
-          *annotation_set,
-          "Ldalvik/annotation/optimization/FastNative;",
-          WellKnownClasses::dalvik_annotation_optimization_FastNative)) {
-    access_flags |= kAccFastNative;
-  }
-  if (IsMethodBuildAnnotationPresent(
-          dex_file,
-          *annotation_set,
-          "Ldalvik/annotation/optimization/CriticalNative;",
-          WellKnownClasses::dalvik_annotation_optimization_CriticalNative)) {
-    access_flags |= kAccCriticalNative;
-  }
-  CHECK_NE(access_flags, kAccFastNative | kAccCriticalNative);
-  return access_flags;
+  return GetNativeMethodAnnotationAccessFlags(dex_file, *annotation_set);
+}
+
+uint32_t GetNativeMethodAnnotationAccessFlags(const DexFile& dex_file,
+                                              const dex::MethodAnnotationsItem& method_annotations) {
+  return GetNativeMethodAnnotationAccessFlags(
+      dex_file, *dex_file.GetMethodAnnotationSetItem(method_annotations));
+}
+
+static bool MethodIsNeverCompile(const DexFile& dex_file,
+                                 const dex::AnnotationSetItem& annotation_set) {
+  return IsMethodBuildAnnotationPresent(
+      dex_file,
+      annotation_set,
+      "Ldalvik/annotation/optimization/NeverCompile;",
+      WellKnownClasses::dalvik_annotation_optimization_NeverCompile);
 }
 
 bool MethodIsNeverCompile(const DexFile& dex_file,
@@ -1330,11 +1358,12 @@ bool MethodIsNeverCompile(const DexFile& dex_file,
   if (annotation_set == nullptr) {
     return false;
   }
-  return IsMethodBuildAnnotationPresent(
-      dex_file,
-      *annotation_set,
-      "Ldalvik/annotation/optimization/NeverCompile;",
-      WellKnownClasses::dalvik_annotation_optimization_NeverCompile);
+  return MethodIsNeverCompile(dex_file, *annotation_set);
+}
+
+bool MethodIsNeverCompile(const DexFile& dex_file,
+                          const dex::MethodAnnotationsItem& method_annotations) {
+  return MethodIsNeverCompile(dex_file, *dex_file.GetMethodAnnotationSetItem(method_annotations));
 }
 
 bool MethodIsNeverInline(const DexFile& dex_file,
@@ -1733,7 +1762,7 @@ const char* GetSourceDebugExtension(Handle<mirror::Class> klass) {
     return nullptr;
   }
   dex::StringIndex index(static_cast<uint32_t>(annotation_value.value_.GetI()));
-  return data.GetDexFile().StringDataByIdx(index);
+  return data.GetDexFile().GetStringData(index);
 }
 
 ObjPtr<mirror::Class> GetNestHost(Handle<mirror::Class> klass) {
@@ -1908,6 +1937,11 @@ static VisitorStatus VisitEncodedValue(const ClassData& klass,
 
   VisitorStatus status =
       VisitElement(visitor, element_name, depth, element_index, annotation_value);
+  if (UNLIKELY(visitor->HasError())) {
+    // Stop visiting since we won't verify the class anyway.
+    return annotations::VisitorStatus::kVisitBreak;
+  }
+
   switch (annotation_value.type_) {
     case DexFile::kDexAnnotationArray: {
       DCHECK(!is_consumed) << " unexpected consumption of array-typed element '" << element_name
@@ -1922,6 +1956,10 @@ static VisitorStatus VisitEncodedValue(const ClassData& klass,
       for (; i < array_size && element_status != VisitorStatus::kVisitBreak; ++i) {
         element_status = VisitEncodedValue(
             klass, dex_file, annotation_ptr, visitor, element_name, next_depth, i);
+        if (UNLIKELY(visitor->HasError())) {
+          // Stop visiting since we won't verify the class anyway.
+          return annotations::VisitorStatus::kVisitBreak;
+        }
       }
       for (; i < array_size; ++i) {
         SkipAnnotationValue(dex_file, annotation_ptr);
@@ -1941,6 +1979,17 @@ static VisitorStatus VisitEncodedValue(const ClassData& klass,
       }
       break;
     }
+    case DexFile::kDexAnnotationMethodType:
+    case DexFile::kDexAnnotationMethodHandle:
+      // kDexAnnotationMethodType and kDexAnnotationMethodHandle return false in order to not
+      // crash the process but they are unexpected here.
+      visitor->SetErrorMsg(StringPrintf(
+          "Encountered unexpected annotation element type 0x%02x of %s for the class %s",
+          annotation_value.type_,
+          element_name,
+          klass.GetRealClass()->PrettyClass().c_str()));
+      // Stop visiting since we won't verify the class anyway.
+      return annotations::VisitorStatus::kVisitBreak;
     default: {
       // kDexAnnotationArray and kDexAnnotationAnnotation are the only 2 known value_types causing
       // ProcessAnnotationValue return false. For other value_types, we shouldn't need to iterate
@@ -1973,7 +2022,7 @@ void VisitClassAnnotations(Handle<mirror::Class> klass, AnnotationVisitor* visit
     uint8_t visibility = annotation_item->visibility_;
     const uint8_t* annotation = annotation_item->annotation_;
     uint32_t type_index = DecodeUnsignedLeb128(&annotation);
-    const char* annotation_descriptor = dex_file.StringByTypeIdx(dex::TypeIndex(type_index));
+    const char* annotation_descriptor = dex_file.GetTypeDescriptor(dex::TypeIndex(type_index));
     VisitorStatus status = visitor->VisitAnnotation(annotation_descriptor, visibility);
     switch (status) {
       case VisitorStatus::kVisitBreak:
@@ -1993,6 +2042,10 @@ void VisitClassAnnotations(Handle<mirror::Class> klass, AnnotationVisitor* visit
 
       status = VisitEncodedValue(
           data, dex_file, &annotation, visitor, element_name, /*depth=*/0, /*ignored*/ 0);
+      if (UNLIKELY(visitor->HasError())) {
+        // Encountered an error, bail out since we won't verify the class anyway.
+        return;
+      }
       if (status == VisitorStatus::kVisitBreak) {
         break;
       }

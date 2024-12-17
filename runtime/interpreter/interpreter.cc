@@ -237,13 +237,12 @@ static JValue ExecuteSwitch(Thread* self,
                             ShadowFrame& shadow_frame,
                             JValue result_register,
                             bool interpret_one_instruction) REQUIRES_SHARED(Locks::mutator_lock_) {
-  if (Runtime::Current()->IsActiveTransaction()) {
-    return ExecuteSwitchImpl<true>(
-        self, accessor, shadow_frame, result_register, interpret_one_instruction);
-  } else {
-    return ExecuteSwitchImpl<false>(
-        self, accessor, shadow_frame, result_register, interpret_one_instruction);
-  }
+  Runtime* runtime = Runtime::Current();
+  auto switch_impl_cpp = runtime->IsActiveTransaction()
+      ? runtime->GetClassLinker()->GetTransactionalInterpreter()
+      : reinterpret_cast<const void*>(&ExecuteSwitchImplCpp</*transaction_active=*/ false>);
+  return ExecuteSwitchImpl(
+      self, accessor, shadow_frame, result_register, interpret_one_instruction, switch_impl_cpp);
 }
 
 NO_STACK_PROTECTOR
@@ -309,7 +308,6 @@ static inline JValue Execute(
                                  shadow_frame,
                                  ret,
                                  instrumentation,
-                                 accessor.InsSize(),
                                  /* unlock_monitors= */ false);
         return ret;
       }
@@ -324,7 +322,6 @@ static inline JValue Execute(
                                    shadow_frame,
                                    ret,
                                    instrumentation,
-                                   accessor.InsSize(),
                                    /* unlock_monitors= */ false);
         }
         return ret;

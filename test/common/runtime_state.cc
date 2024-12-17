@@ -20,7 +20,7 @@
 
 #include "art_field.h"
 #include "art_method-inl.h"
-#include "base/enums.h"
+#include "base/pointer_size.h"
 #include "common_throws.h"
 #include "dex/dex_file-inl.h"
 #include "dex/dex_file_types.h"
@@ -441,6 +441,22 @@ extern "C" JNIEXPORT jint JNICALL Java_Main_getJitThreshold(JNIEnv*, jclass) {
 extern "C" JNIEXPORT void JNICALL Java_Main_deoptimizeBootImage(JNIEnv*, jclass) {
   ScopedSuspendAll ssa(__FUNCTION__);
   Runtime::Current()->DeoptimizeBootImage();
+}
+
+extern "C" JNIEXPORT void JNICALL Java_Main_deoptimizeNativeMethod(JNIEnv* env,
+                                                                   jclass,
+                                                                   jclass cls,
+                                                                   jstring method_name) {
+  Thread* self = Thread::Current();
+  ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+  // Make initialized classes visibly initialized to avoid entrypoint being set to boot JNI stub
+  // after deoptimize.
+  class_linker->MakeInitializedClassesVisiblyInitialized(self, /*wait=*/ true);
+  ScopedObjectAccess soa(self);
+  ScopedUtfChars chars(env, method_name);
+  ArtMethod* method = GetMethod(soa, cls, chars);
+  CHECK(method->IsNative());
+  Runtime::Current()->GetInstrumentation()->InitializeMethodsCode(method, /*aot_code=*/ nullptr);
 }
 
 extern "C" JNIEXPORT jboolean JNICALL Java_Main_isDebuggable(JNIEnv*, jclass) {

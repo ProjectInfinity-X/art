@@ -35,13 +35,14 @@
 #include "odr_metrics.h"
 #include "odrefresh.h"
 #include "odrefresh/odrefresh.h"
+#include "selinux/android.h"
+#include "selinux/selinux.h"
 
 namespace {
 
 using ::android::base::GetProperty;
 using ::android::base::ParseBool;
 using ::android::base::ParseBoolResult;
-using ::android::base::StartsWith;
 using ::art::odrefresh::CompilationOptions;
 using ::art::odrefresh::ExitCode;
 using ::art::odrefresh::kCheckedSystemPropertyPrefixes;
@@ -117,7 +118,7 @@ std::string GetEnvironmentVariableOrDefault(const char* name, std::string defaul
 }
 
 bool ArgumentMatches(std::string_view argument, std::string_view prefix, std::string* value) {
-  if (android::base::StartsWith(argument, prefix)) {
+  if (argument.starts_with(prefix)) {
     *value = std::string(argument.substr(prefix.size()));
     return true;
   }
@@ -155,7 +156,8 @@ int InitializeConfig(int argc, char** argv, OdrConfig* config) {
     } else if (ArgumentMatches(arg, "--system-server-compiler-filter=", &value)) {
       config->SetSystemServerCompilerFilter(value);
     } else if (ArgumentMatches(arg, "--staging-dir=", &value)) {
-      config->SetStagingDir(value);
+      // Keep this for compatibility with CompOS in old platforms.
+      LOG(WARNING) << "--staging-dir is deprecated and its value is ignored";
     } else if (ArgumentEquals(arg, "--dry-run")) {
       config->SetDryRun();
     } else if (ArgumentMatches(arg, "--partial-compilation=", &value)) {
@@ -164,6 +166,8 @@ int InitializeConfig(int argc, char** argv, OdrConfig* config) {
       config->SetRefresh(false);
     } else if (ArgumentEquals(arg, "--minimal")) {
       config->SetMinimal(true);
+    } else if (ArgumentEquals(arg, "--only-boot-images")) {
+      config->SetOnlyBootImages(true);
     } else {
       ArgumentError("Unrecognized argument: '%s'", arg);
     }
@@ -199,13 +203,13 @@ int InitializeConfig(int argc, char** argv, OdrConfig* config) {
 }
 
 void GetSystemProperties(std::unordered_map<std::string, std::string>* system_properties) {
-  SystemPropertyForeach([&](const char* name, const char* value) {
+  SystemPropertyForeach([&](std::string_view name, const char* value) {
     if (strlen(value) == 0) {
       return;
     }
     for (const char* prefix : kCheckedSystemPropertyPrefixes) {
-      if (StartsWith(name, prefix)) {
-        (*system_properties)[name] = value;
+      if (name.starts_with(prefix)) {
+        (*system_properties)[std::string(name)] = value;
       }
     }
   });
@@ -238,8 +242,6 @@ NO_RETURN void UsageHelp(const char* argv0) {
   UsageMsg("                                 OS.");
   UsageMsg("--dalvik-cache=<DIR>             Write artifacts to .../<DIR> rather than");
   UsageMsg("                                 .../dalvik-cache");
-  UsageMsg("--staging-dir=<DIR>              Write temporary artifacts to <DIR> rather than");
-  UsageMsg("                                 .../staging");
   UsageMsg("--zygote-arch=<STRING>           Zygote kind that overrides ro.zygote");
   UsageMsg("--boot-image-compiler-filter=<STRING>");
   UsageMsg("                                 Compiler filter for the boot image. Default: ");
@@ -248,6 +250,7 @@ NO_RETURN void UsageHelp(const char* argv0) {
   UsageMsg("                                 Compiler filter that overrides");
   UsageMsg("                                 dalvik.vm.systemservercompilerfilter");
   UsageMsg("--minimal                        Generate a minimal boot image only.");
+  UsageMsg("--only-boot-images               Generate boot images only.");
 
   exit(EX_USAGE);
 }
@@ -277,7 +280,7 @@ int main(int argc, char** argv) {
   GetSystemProperties(config.MutableSystemProperties());
 
   OdrMetrics metrics(config.GetArtifactDirectory());
-  OnDeviceRefresh odr(config);
+  OnDeviceRefresh odr(config, setfilecon, selinux_android_restorecon);
 
   std::string_view action(argv[0]);
   CompilationOptions compilation_options;

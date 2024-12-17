@@ -164,7 +164,7 @@ class RuntimeImageHelper {
         heap->GetBootImagesSize(),
         boot_image_components,
         boot_image_checksums,
-        static_cast<uint32_t>(kRuntimePointerSize));
+        kRuntimePointerSize);
 
     // Data size includes everything except the bitmap and the header.
     header_.data_size_ = sections_end - sizeof(ImageHeader);
@@ -955,7 +955,16 @@ class RuntimeImageHelper {
       const OatFile* oat_file = image_spaces[0]->GetOatFile();
       DCHECK(oat_file != nullptr);
       const OatHeader& header = oat_file->GetOatHeader();
-      copy->SetEntryPointFromQuickCompiledCode(header.GetOatAddress(stub));
+      const void* entrypoint = header.GetOatAddress(stub);
+      if (method->IsNative() && (is_class_initialized || !method->NeedsClinitCheckBeforeCall())) {
+        // Use boot JNI stub if found.
+        ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+        const void* boot_jni_stub = class_linker->FindBootJniStub(method);
+        if (boot_jni_stub != nullptr) {
+          entrypoint = boot_jni_stub;
+        }
+      }
+      copy->SetEntryPointFromQuickCompiledCode(entrypoint);
 
       if (method->IsNative()) {
         StubType stub_type = method->IsCriticalNative()
@@ -1601,9 +1610,15 @@ class RuntimeImageHelper {
     // Clear static field values.
     auto clear_class = [&] () REQUIRES_SHARED(Locks::mutator_lock_) {
       MemberOffset static_offset = cls->GetFirstReferenceStaticFieldOffset(kRuntimePointerSize);
-      memset(objects_.data() + offset + static_offset.Uint32Value(),
-             0,
-             cls->GetClassSize() - static_offset.Uint32Value());
+      uint32_t ref_offsets = cls->GetReferenceInstanceOffsets();
+      size_t size = cls->GetClassSize() - static_offset.Uint32Value();
+      // Adjust for overflow instance-offset bitmap, which is after the static
+      // fields.
+      if ((ref_offsets & mirror::Class::kVisitReferencesSlowpathMask) != 0) {
+        ref_offsets &= ~mirror::Class::kVisitReferencesSlowpathMask;
+        size -= ref_offsets * sizeof(uint32_t);
+      }
+      memset(objects_.data() + offset + static_offset.Uint32Value(), 0, size);
     };
     clear_class();
 

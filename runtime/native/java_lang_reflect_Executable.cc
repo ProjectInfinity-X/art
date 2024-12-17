@@ -255,6 +255,11 @@ static jint Executable_compareMethodParametersInternal(JNIEnv* env,
   this_method = this_method->GetInterfaceMethodIfProxy(kRuntimePointerSize);
   other_method = other_method->GetInterfaceMethodIfProxy(kRuntimePointerSize);
 
+  // Get dex files early. (`ArtMethod::GetParameterTypeList()` includes `GetDexFile()`,
+  // so the compiler should deduplicate these subexpressions after inlining.)
+  const DexFile* this_dex_file = this_method->GetDexFile();
+  const DexFile* other_dex_file = other_method->GetDexFile();
+
   const dex::TypeList* this_list = this_method->GetParameterTypeList();
   const dex::TypeList* other_list = other_method->GetParameterTypeList();
 
@@ -278,18 +283,9 @@ static jint Executable_compareMethodParametersInternal(JNIEnv* env,
   }
 
   for (int32_t i = 0; i < this_size; ++i) {
-    const dex::TypeId& lhs = this_method->GetDexFile()->GetTypeId(
-        this_list->GetTypeItem(i).type_idx_);
-    const dex::TypeId& rhs = other_method->GetDexFile()->GetTypeId(
-        other_list->GetTypeItem(i).type_idx_);
-
-    uint32_t lhs_len, rhs_len;
-    const char* lhs_data = this_method->GetDexFile()->StringDataAndUtf16LengthByIdx(
-        lhs.descriptor_idx_, &lhs_len);
-    const char* rhs_data = other_method->GetDexFile()->StringDataAndUtf16LengthByIdx(
-        rhs.descriptor_idx_, &rhs_len);
-
-    int cmp = strcmp(lhs_data, rhs_data);
+    int cmp = DexFile::CompareDescriptors(
+        this_dex_file->GetTypeDescriptorView(this_list->GetTypeItem(i).type_idx_),
+        other_dex_file->GetTypeDescriptorView(other_list->GetTypeItem(i).type_idx_));
     if (cmp != 0) {
       return (cmp < 0) ? -1 : 1;
     }

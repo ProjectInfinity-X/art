@@ -25,8 +25,8 @@
 #include "android-base/strings.h"
 #include "art_method-inl.h"
 #include "base/compiler_filter.h"
-#include "base/enums.h"
 #include "base/logging.h"  // For VLOG.
+#include "base/pointer_size.h"
 #include "base/scoped_arena_containers.h"
 #include "base/stl_util.h"
 #include "base/systrace.h"
@@ -124,34 +124,26 @@ void ProfileSaver::Run() {
   // under mutex, but should drop it.
   Locks::profiler_lock_->ExclusiveUnlock(self);
 
-  bool check_for_first_save =
-      options_.GetMinFirstSaveMs() != ProfileSaverOptions::kMinFirstSaveMsNotSet;
-  bool force_early_first_save = check_for_first_save && IsFirstSave();
+  // Fetch the resolved classes for the app images after waiting for Startup
+  // completion notification.
+  const uint64_t thread_start_time = NanoTime();
 
-  // Fetch the resolved classes for the app images after sleeping for
-  // options_.GetSaveResolvedClassesDelayMs().
-  // TODO(calin) This only considers the case of the primary profile file.
-  // Anything that gets loaded in the same VM will not have their resolved
-  // classes save (unless they started before the initial saving was done).
-  {
+  // Wait for startup to complete with a timeout at StartupCompletedTask.
+  // Note that we may be woken up by JIT notifications.
+  // We need to wait for startup to complete to make sure we have
+  // the resolved classes and methods.
+  while (!Runtime::Current()->GetStartupCompleted() && !ShuttingDown(self)) {
     MutexLock mu(self, wait_lock_);
-
-    const uint64_t sleep_time = MsToNs(force_early_first_save
-      ? options_.GetMinFirstSaveMs()
-      : options_.GetSaveResolvedClassesDelayMs());
-    const uint64_t start_time = NanoTime();
-    const uint64_t end_time = start_time + sleep_time;
-    while (!Runtime::Current()->GetStartupCompleted() || force_early_first_save) {
-      const uint64_t current_time = NanoTime();
-      if (current_time >= end_time) {
-        break;
-      }
-      period_condition_.TimedWait(self, NsToMs(end_time - current_time), 0);
-    }
-    total_ms_of_sleep_ += NsToMs(NanoTime() - start_time);
+    // Make sure to sleep again until startup is completed.
+    period_condition_.Wait(self);
   }
 
+  // Mark collected classes/methods as startup.
   FetchAndCacheResolvedClassesAndMethods(/*startup=*/ true);
+
+  bool is_min_first_save_set =
+      options_.GetMinFirstSaveMs() != ProfileSaverOptions::kMinFirstSaveMsNotSet;
+  bool force_first_save = is_min_first_save_set && IsFirstSave();
 
   // When we save without waiting for JIT notifications we use a simple
   // exponential back off policy bounded by max_wait_without_jit.
@@ -160,24 +152,35 @@ void ProfileSaver::Run() {
 
   // Loop for the profiled methods.
   while (!ShuttingDown(self)) {
-    // Sleep only if we don't have to force an early first save configured
-    // with GetMinFirstSaveMs().
-    // If we do have to save early, move directly to the processing part
-    // since we already slept before fetching and resolving the startup
-    // classes.
-    if (!force_early_first_save) {
-      uint64_t sleep_start = NanoTime();
-      uint64_t sleep_time = 0;
+    // In case of force_first_save we need to count from the start of the thread.
+    uint64_t sleep_start = force_first_save ? thread_start_time : NanoTime();
+    uint64_t sleep_time = 0;
+    {
+      MutexLock mu(self, wait_lock_);
+      if (options_.GetWaitForJitNotificationsToSave()) {
+        period_condition_.Wait(self);
+      } else {
+        period_condition_.TimedWait(self, cur_wait_without_jit, 0);
+        if (cur_wait_without_jit < max_wait_without_jit) {
+          cur_wait_without_jit *= 2;
+        }
+      }
+      sleep_time = NanoTime() - sleep_start;
+    }
+    // Check if the thread was woken up for shutdown.
+    if (ShuttingDown(self)) {
+      break;
+    }
+    total_number_of_wake_ups_++;
+    // We might have been woken up by a huge number of notifications to guarantee saving.
+    // If we didn't meet the minimum saving period go back to sleep (only if missed by
+    // a reasonable margin).
+    uint64_t min_save_period_ns = MsToNs(force_first_save ? options_.GetMinFirstSaveMs() :
+                                                                  options_.GetMinSavePeriodMs());
+    while (min_save_period_ns * 0.9 > sleep_time) {
       {
         MutexLock mu(self, wait_lock_);
-        if (options_.GetWaitForJitNotificationsToSave()) {
-          period_condition_.Wait(self);
-        } else {
-          period_condition_.TimedWait(self, cur_wait_without_jit, 0);
-          if (cur_wait_without_jit < max_wait_without_jit) {
-            cur_wait_without_jit *= 2;
-          }
-        }
+        period_condition_.TimedWait(self, NsToMs(min_save_period_ns - sleep_time), 0);
         sleep_time = NanoTime() - sleep_start;
       }
       // Check if the thread was woken up for shutdown.
@@ -185,24 +188,8 @@ void ProfileSaver::Run() {
         break;
       }
       total_number_of_wake_ups_++;
-      // We might have been woken up by a huge number of notifications to guarantee saving.
-      // If we didn't meet the minimum saving period go back to sleep (only if missed by
-      // a reasonable margin).
-      uint64_t min_save_period_ns = MsToNs(options_.GetMinSavePeriodMs());
-      while (min_save_period_ns * 0.9 > sleep_time) {
-        {
-          MutexLock mu(self, wait_lock_);
-          period_condition_.TimedWait(self, NsToMs(min_save_period_ns - sleep_time), 0);
-          sleep_time = NanoTime() - sleep_start;
-        }
-        // Check if the thread was woken up for shutdown.
-        if (ShuttingDown(self)) {
-          break;
-        }
-        total_number_of_wake_ups_++;
-      }
-      total_ms_of_sleep_ += NsToMs(NanoTime() - sleep_start);
     }
+    total_ms_of_sleep_ += NsToMs(NanoTime() - sleep_start);
 
     if (ShuttingDown(self)) {
       break;
@@ -210,15 +197,12 @@ void ProfileSaver::Run() {
 
     uint16_t number_of_new_methods = 0;
     uint64_t start_work = NanoTime();
-    // If we force an early_first_save do not run FetchAndCacheResolvedClassesAndMethods
-    // again. We just did it. So pass true to skip_class_and_method_fetching.
     bool profile_saved_to_disk = ProcessProfilingInfo(
         /*force_save=*/ false,
-        /*skip_class_and_method_fetching=*/ force_early_first_save,
         &number_of_new_methods);
 
     // Reset the flag, so we can continue on the normal schedule.
-    force_early_first_save = false;
+    force_first_save = false;
 
     // Update the notification counter based on result. Note that there might be contention on this
     // but we don't care about to be 100% precise.
@@ -335,7 +319,6 @@ class ProfileSaver::GetClassesAndMethodsHelper {
       REQUIRES_SHARED(Locks::mutator_lock_)
       : startup_(startup),
         profile_boot_class_path_(options.GetProfileBootClassPath()),
-        hot_method_sample_threshold_(CalculateHotMethodSampleThreshold(startup, options)),
         extra_flags_(GetExtraMethodHotnessFlags(options)),
         annotation_(annotation),
         arena_stack_(Runtime::Current()->GetArenaPool()),
@@ -358,10 +341,6 @@ class ProfileSaver::GetClassesAndMethodsHelper {
   void CollectClasses(Thread* self) REQUIRES_SHARED(Locks::mutator_lock_);
   void UpdateProfile(const std::set<std::string>& locations, ProfileCompilationInfo* profile_info);
 
-  uint32_t GetHotMethodSampleThreshold() const {
-    return hot_method_sample_threshold_;
-  }
-
   size_t GetNumberOfHotMethods() const {
     return number_of_hot_methods_;
   }
@@ -371,22 +350,6 @@ class ProfileSaver::GetClassesAndMethodsHelper {
   }
 
  private:
-  // GetClassLoadersVisitor collects visited class loaders.
-  class GetClassLoadersVisitor : public ClassLoaderVisitor {
-   public:
-    explicit GetClassLoadersVisitor(VariableSizedHandleScope* class_loaders)
-        : class_loaders_(class_loaders) {}
-
-    void Visit(ObjPtr<mirror::ClassLoader> class_loader)
-        REQUIRES_SHARED(Locks::classlinker_classes_lock_, Locks::mutator_lock_) override {
-      DCHECK(class_loader != nullptr);
-      class_loaders_->NewHandle(class_loader);
-    }
-
-   private:
-    VariableSizedHandleScope* const class_loaders_;
-  };
-
   class CollectInternalVisitor {
    public:
     explicit CollectInternalVisitor(GetClassesAndMethodsHelper* helper)
@@ -425,19 +388,6 @@ class ProfileSaver::GetClassesAndMethodsHelper {
 
   using DexFileRecordsMap = ScopedArenaHashMap<const DexFile*, DexFileRecords*>;
 
-  static uint32_t CalculateHotMethodSampleThreshold(bool startup,
-                                                    const ProfileSaverOptions& options) {
-    Runtime* runtime = Runtime::Current();
-    if (startup) {
-      const bool is_low_ram = runtime->GetHeap()->IsLowMemoryMode();
-      return options.GetHotStartupMethodSamples(is_low_ram);
-    } else if (runtime->GetJit() != nullptr) {
-      return runtime->GetJit()->WarmMethodThreshold();
-    } else {
-      return std::numeric_limits<uint32_t>::max();
-    }
-  }
-
   ALWAYS_INLINE static bool ShouldCollectClasses(bool startup) {
     // We only record classes for the startup case. This may change in the future.
     return startup;
@@ -450,7 +400,6 @@ class ProfileSaver::GetClassesAndMethodsHelper {
 
   const bool startup_;
   const bool profile_boot_class_path_;
-  const uint32_t hot_method_sample_threshold_;
   const uint32_t extra_flags_;
   const ProfileCompilationInfo::ProfileSampleAnnotation annotation_;
   ArenaStack arena_stack_;
@@ -568,12 +517,7 @@ void ProfileSaver::GetClassesAndMethodsHelper::CollectClasses(Thread* self) {
   // a member variable to keep them alive and prevent unloading their classes,
   // so that methods referenced in collected `DexFileRecords` remain valid.
   class_loaders_.emplace(self);
-  {
-    GetClassLoadersVisitor class_loader_visitor(&class_loaders_.value());
-    ClassLinker* const class_linker = Runtime::Current()->GetClassLinker();
-    ReaderMutexLock mu(self, *Locks::classlinker_classes_lock_);
-    class_linker->VisitClassLoaders(&class_loader_visitor);
-  }
+  Runtime::Current()->GetClassLinker()->GetClassLoaders(self, &class_loaders_.value());
 
   // Collect classes and their method array pointers.
   if (profile_boot_class_path_) {
@@ -630,7 +574,6 @@ void ProfileSaver::GetClassesAndMethodsHelper::UpdateProfile(const std::set<std:
                                                              ProfileCompilationInfo* profile_info) {
   // Move members to local variables to allow the compiler to optimize this properly.
   const bool startup = startup_;
-  const uint32_t hot_method_sample_threshold = hot_method_sample_threshold_;
   const uint32_t base_flags =
       (startup ? Hotness::kFlagStartup : Hotness::kFlagPostStartup) | extra_flags_;
 
@@ -640,10 +583,9 @@ void ProfileSaver::GetClassesAndMethodsHelper::UpdateProfile(const std::set<std:
 
   uint16_t initial_value = Runtime::Current()->GetJITOptions()->GetWarmupThreshold();
   auto get_method_flags = [&](ArtMethod& method) {
-    // Mark methods as hot if they have more than hot_method_sample_threshold
-    // samples. This means they will get compiled by the compiler driver.
-    if (method.PreviouslyWarm() ||
-        method.CounterHasReached(hot_method_sample_threshold, initial_value)) {
+    // Mark methods as hot if they are marked as such (warm for the runtime
+    // means hot for the profile).
+    if (method.PreviouslyWarm()) {
       ++number_of_hot_methods;
       return enum_cast<ProfileCompilationInfo::MethodHotness::Flag>(base_flags | Hotness::kFlagHot);
     } else if (method.CounterHasChanged(initial_value)) {
@@ -681,9 +623,9 @@ void ProfileSaver::GetClassesAndMethodsHelper::UpdateProfile(const std::set<std:
         DCHECK(ShouldCollectClasses(startup));
         DCHECK(class_record.methods == nullptr);  // No methods to process.
         array_class_descriptor.assign(class_record.array_dimension, '[');
-        array_class_descriptor += dex_file->StringByTypeIdx(class_record.type_index);
+        array_class_descriptor += dex_file->GetTypeDescriptorView(class_record.type_index);
         dex::TypeIndex type_index =
-            profile_info->FindOrCreateTypeIndex(*dex_file, array_class_descriptor.c_str());
+            profile_info->FindOrCreateTypeIndex(*dex_file, array_class_descriptor);
         if (type_index.IsValid()) {
           profile_info->AddClass(profile_index, type_index);
         }
@@ -737,7 +679,7 @@ void ProfileSaver::GetClassesAndMethodsHelper::UpdateProfile(const std::set<std:
           array_class_descriptor.assign(dim, '[');
           array_class_descriptor += Primitive::Descriptor(enum_cast<Primitive::Type>(i));
           dex::TypeIndex type_index =
-              profile_info->FindOrCreateTypeIndex(*dex_file, array_class_descriptor.c_str());
+              profile_info->FindOrCreateTypeIndex(*dex_file, array_class_descriptor);
           if (type_index.IsValid()) {
             profile_info->AddClass(profile_index, type_index);
           }
@@ -771,7 +713,6 @@ void ProfileSaver::FetchAndCacheResolvedClassesAndMethods(bool startup) {
     profiler_pthread = profiler_pthread_;
   }
 
-  uint32_t hot_method_sample_threshold = 0u;
   size_t number_of_hot_methods = 0u;
   size_t number_of_sampled_methods = 0u;
   {
@@ -786,7 +727,6 @@ void ProfileSaver::FetchAndCacheResolvedClassesAndMethods(bool startup) {
 
     ScopedObjectAccess soa(self);
     GetClassesAndMethodsHelper helper(startup, options_, GetProfileSampleAnnotation());
-    hot_method_sample_threshold = helper.GetHotMethodSampleThreshold();
     helper.CollectClasses(self);
 
     // Release the mutator lock. We shall need to re-acquire the lock for a moment to
@@ -821,14 +761,10 @@ void ProfileSaver::FetchAndCacheResolvedClassesAndMethods(bool startup) {
   }
   VLOG(profiler) << "Profile saver recorded " << number_of_hot_methods
                  << " hot methods and " << number_of_sampled_methods
-                 << " sampled methods with threshold " << hot_method_sample_threshold
-                 << " in " << PrettyDuration(NanoTime() - start_time);
+                 << " sampled methods in " << PrettyDuration(NanoTime() - start_time);
 }
 
-bool ProfileSaver::ProcessProfilingInfo(
-        bool force_save,
-        bool skip_class_and_method_fetching,
-        /*out*/uint16_t* number_of_new_methods) {
+bool ProfileSaver::ProcessProfilingInfo(bool force_save, /*out*/uint16_t* number_of_new_methods) {
   ScopedTrace trace(__PRETTY_FUNCTION__);
 
   // Resolve any new registered locations.
@@ -846,11 +782,7 @@ bool ProfileSaver::ProcessProfilingInfo(
     *number_of_new_methods = 0;
   }
 
-  if (!skip_class_and_method_fetching) {
-    // We only need to do this once, not once per dex location.
-    // TODO: Figure out a way to only do it when stuff has changed? It takes 30-50ms.
-    FetchAndCacheResolvedClassesAndMethods(/*startup=*/ false);
-  }
+  FetchAndCacheResolvedClassesAndMethods(/*startup=*/ false);
 
   for (const auto& it : tracked_locations) {
     if (!force_save && ShuttingDown(Thread::Current())) {
@@ -1130,10 +1062,7 @@ void ProfileSaver::Stop(bool dump_info) {
 
   // Force save everything before destroying the thread since we want profiler_pthread_ to remain
   // valid.
-  profile_saver->ProcessProfilingInfo(
-      /*force_ save=*/ true,
-      /*skip_class_and_method_fetching=*/ false,
-      /*number_of_new_methods=*/ nullptr);
+  profile_saver->ProcessProfilingInfo(/*force_ save=*/ true, /*number_of_new_methods=*/ nullptr);
 
   // Wait for the saver thread to stop.
   CHECK_PTHREAD_CALL(pthread_join, (profiler_pthread, nullptr), "profile saver thread shutdown");
@@ -1252,10 +1181,7 @@ void ProfileSaver::ForceProcessProfiles() {
   // but we only use this in testing when we now this won't happen.
   // Refactor the way we handle the instance so that we don't end up in this situation.
   if (saver != nullptr) {
-    saver->ProcessProfilingInfo(
-        /*force_save=*/ true,
-        /*skip_class_and_method_fetching=*/ false,
-        /*number_of_new_methods=*/ nullptr);
+    saver->ProcessProfilingInfo(/*force_save=*/ true, /*number_of_new_methods=*/ nullptr);
   }
 }
 

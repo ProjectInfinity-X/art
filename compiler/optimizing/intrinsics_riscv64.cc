@@ -595,7 +595,7 @@ void IntrinsicCodeGeneratorRISCV64::VisitLongNumberOfTrailingZeros(HInvoke* invo
   EmitIntegralUnOp(invoke, [&](XRegister rd, XRegister rs1) { __ Ctz(rd, rs1); });
 }
 
-static void GenerateDivideUnsigned(HInvoke* invoke, CodeGeneratorRISCV64* codegen) {
+static void GenerateDivRemUnsigned(HInvoke* invoke, bool is_div, CodeGeneratorRISCV64* codegen) {
   LocationSummary* locations = invoke->GetLocations();
   Riscv64Assembler* assembler = codegen->GetAssembler();
   DataType::Type type = invoke->GetType();
@@ -611,10 +611,18 @@ static void GenerateDivideUnsigned(HInvoke* invoke, CodeGeneratorRISCV64* codege
   codegen->AddSlowPath(slow_path);
   __ Beqz(divisor, slow_path->GetEntryLabel());
 
-  if (type == DataType::Type::kInt32) {
-    __ Divuw(out, dividend, divisor);
+  if (is_div) {
+    if (type == DataType::Type::kInt32) {
+      __ Divuw(out, dividend, divisor);
+    } else {
+      __ Divu(out, dividend, divisor);
+    }
   } else {
-    __ Divu(out, dividend, divisor);
+    if (type == DataType::Type::kInt32) {
+      __ Remuw(out, dividend, divisor);
+    } else {
+      __ Remu(out, dividend, divisor);
+    }
   }
 
   __ Bind(slow_path->GetExitLabel());
@@ -625,7 +633,7 @@ void IntrinsicLocationsBuilderRISCV64::VisitIntegerDivideUnsigned(HInvoke* invok
 }
 
 void IntrinsicCodeGeneratorRISCV64::VisitIntegerDivideUnsigned(HInvoke* invoke) {
-  GenerateDivideUnsigned(invoke, codegen_);
+  GenerateDivRemUnsigned(invoke, /*is_div=*/true, codegen_);
 }
 
 void IntrinsicLocationsBuilderRISCV64::VisitLongDivideUnsigned(HInvoke* invoke) {
@@ -633,30 +641,45 @@ void IntrinsicLocationsBuilderRISCV64::VisitLongDivideUnsigned(HInvoke* invoke) 
 }
 
 void IntrinsicCodeGeneratorRISCV64::VisitLongDivideUnsigned(HInvoke* invoke) {
-  GenerateDivideUnsigned(invoke, codegen_);
+  GenerateDivRemUnsigned(invoke, /*is_div=*/true, codegen_);
 }
 
-#define VISIT_INTRINSIC(name, low, high, type, start_index) \
-  void IntrinsicLocationsBuilderRISCV64::Visit ##name ##ValueOf(HInvoke* invoke) { \
-    InvokeRuntimeCallingConvention calling_convention; \
-    IntrinsicVisitor::ComputeValueOfLocations( \
-        invoke, \
-        codegen_, \
-        low, \
-        high - low + 1, \
-        calling_convention.GetReturnLocation(DataType::Type::kReference), \
-        Location::RegisterLocation(calling_convention.GetRegisterAt(0))); \
-  } \
-  void IntrinsicCodeGeneratorRISCV64::Visit ##name ##ValueOf(HInvoke* invoke) { \
-    IntrinsicVisitor::ValueOfInfo info = \
-        IntrinsicVisitor::ComputeValueOfInfo( \
-            invoke, \
-            codegen_->GetCompilerOptions(), \
-            WellKnownClasses::java_lang_ ##name ##_value, \
-            low, \
-            high - low + 1, \
-            start_index); \
-    HandleValueOf(invoke, info, type); \
+void IntrinsicLocationsBuilderRISCV64::VisitIntegerRemainderUnsigned(HInvoke* invoke) {
+  CreateIntIntToIntSlowPathCallLocations(allocator_, invoke);
+}
+
+void IntrinsicCodeGeneratorRISCV64::VisitIntegerRemainderUnsigned(HInvoke* invoke) {
+  GenerateDivRemUnsigned(invoke, /*is_div=*/false, codegen_);
+}
+
+void IntrinsicLocationsBuilderRISCV64::VisitLongRemainderUnsigned(HInvoke* invoke) {
+  CreateIntIntToIntSlowPathCallLocations(allocator_, invoke);
+}
+
+void IntrinsicCodeGeneratorRISCV64::VisitLongRemainderUnsigned(HInvoke* invoke) {
+  GenerateDivRemUnsigned(invoke, /*is_div=*/false, codegen_);
+}
+
+#define VISIT_INTRINSIC(name, low, high, type, start_index)                              \
+  void IntrinsicLocationsBuilderRISCV64::Visit##name##ValueOf(HInvoke* invoke) {         \
+    InvokeRuntimeCallingConvention calling_convention;                                   \
+    IntrinsicVisitor::ComputeValueOfLocations(                                           \
+        invoke,                                                                          \
+        codegen_,                                                                        \
+        low,                                                                             \
+        (high) - (low) + 1,                                                              \
+        calling_convention.GetReturnLocation(DataType::Type::kReference),                \
+        Location::RegisterLocation(calling_convention.GetRegisterAt(0)));                \
+  }                                                                                      \
+  void IntrinsicCodeGeneratorRISCV64::Visit##name##ValueOf(HInvoke* invoke) {            \
+    IntrinsicVisitor::ValueOfInfo info =                                                 \
+        IntrinsicVisitor::ComputeValueOfInfo(invoke,                                     \
+                                             codegen_->GetCompilerOptions(),             \
+                                             WellKnownClasses::java_lang_##name##_value, \
+                                             low,                                        \
+                                             (high) - (low) + 1,                         \
+                                             start_index);                               \
+    HandleValueOf(invoke, info, type);                                                   \
   }
   BOXED_TYPES(VISIT_INTRINSIC)
 #undef VISIT_INTRINSIC
@@ -767,8 +790,8 @@ void IntrinsicCodeGeneratorRISCV64::VisitReferenceGetReferent(HInvoke* invoke) {
                                                     out,
                                                     obj.AsRegister<XRegister>(),
                                                     referent_offset,
-                                                    /*maybe_temp=*/ locations->GetTemp(0),
-                                                    /*needs_null_check=*/ false);
+                                                    /*temp=*/locations->GetTemp(0),
+                                                    /*needs_null_check=*/false);
   } else {
     codegen_->GetInstructionVisitor()->Load(
         out, obj.AsRegister<XRegister>(), referent_offset, DataType::Type::kReference);
@@ -1071,6 +1094,122 @@ static void EmitLoadReserved(Riscv64Assembler* assembler,
       LOG(FATAL) << "Unexpected type: " << type;
       UNREACHABLE();
   }
+}
+
+void IntrinsicLocationsBuilderRISCV64::VisitStringEquals(HInvoke* invoke) {
+  LocationSummary* locations =
+      new (allocator_) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
+  locations->SetInAt(0, Location::RequiresRegister());
+  locations->SetInAt(1, Location::RequiresRegister());
+  locations->AddTemp(Location::RequiresRegister());
+  // TODO: If the String.equals() is used only for an immediately following HIf, we can
+  // mark it as emitted-at-use-site and emit branches directly to the appropriate blocks.
+  // Then we shall need an extra temporary register instead of the output register.
+  locations->SetOut(Location::RequiresRegister(), Location::kOutputOverlap);
+}
+
+void IntrinsicCodeGeneratorRISCV64::VisitStringEquals(HInvoke* invoke) {
+  Riscv64Assembler* assembler = GetAssembler();
+  LocationSummary* locations = invoke->GetLocations();
+
+  // Get offsets of count, value, and class fields within a string object.
+  const int32_t count_offset = mirror::String::CountOffset().Int32Value();
+  const int32_t value_offset = mirror::String::ValueOffset().Int32Value();
+  const int32_t class_offset = mirror::Object::ClassOffset().Int32Value();
+
+  XRegister str = locations->InAt(0).AsRegister<XRegister>();
+  XRegister arg = locations->InAt(1).AsRegister<XRegister>();
+  XRegister out = locations->Out().AsRegister<XRegister>();
+
+  ScratchRegisterScope srs(assembler);
+  XRegister temp = srs.AllocateXRegister();
+  XRegister temp1 = locations->GetTemp(0).AsRegister<XRegister>();
+
+  Riscv64Label loop;
+  Riscv64Label end;
+  Riscv64Label return_true;
+  Riscv64Label return_false;
+
+  DCHECK(!invoke->CanDoImplicitNullCheckOn(invoke->InputAt(0)));
+
+  StringEqualsOptimizations optimizations(invoke);
+  if (!optimizations.GetArgumentNotNull()) {
+    // Check if input is null, return false if it is.
+    __ Beqz(arg, &return_false);
+  }
+
+  // Reference equality check, return true if same reference.
+  __ Beq(str, arg, &return_true);
+
+  if (!optimizations.GetArgumentIsString()) {
+    // Instanceof check for the argument by comparing class fields.
+    // All string objects must have the same type since String cannot be subclassed.
+    // Receiver must be a string object, so its class field is equal to all strings' class fields.
+    // If the argument is a string object, its class field must be equal to receiver's class field.
+    //
+    // As the String class is expected to be non-movable, we can read the class
+    // field from String.equals' arguments without read barriers.
+    AssertNonMovableStringClass();
+    // /* HeapReference<Class> */ temp = str->klass_
+    __ Loadwu(temp, str, class_offset);
+    // /* HeapReference<Class> */ temp1 = arg->klass_
+    __ Loadwu(temp1, arg, class_offset);
+    // Also, because we use the previously loaded class references only in the
+    // following comparison, we don't need to unpoison them.
+    __ Bne(temp, temp1, &return_false);
+  }
+
+  // Load `count` fields of this and argument strings.
+  __ Loadwu(temp, str, count_offset);
+  __ Loadwu(temp1, arg, count_offset);
+  // Check if `count` fields are equal, return false if they're not.
+  // Also compares the compression style, if differs return false.
+  __ Bne(temp, temp1, &return_false);
+
+  // Assertions that must hold in order to compare strings 8 bytes at a time.
+  // Ok to do this because strings are zero-padded to kObjectAlignment.
+  DCHECK_ALIGNED(value_offset, 8);
+  static_assert(IsAligned<8>(kObjectAlignment), "String of odd length is not zero padded");
+
+  // Return true if both strings are empty. Even with string compression `count == 0` means empty.
+  static_assert(static_cast<uint32_t>(mirror::StringCompressionFlag::kCompressed) == 0u,
+                "Expecting 0=compressed, 1=uncompressed");
+  __ Beqz(temp, &return_true);
+
+  if (mirror::kUseStringCompression) {
+    // For string compression, calculate the number of bytes to compare (not chars).
+    // This could in theory exceed INT32_MAX, so treat temp as unsigned.
+    __ Andi(temp1, temp, 1);     // Extract compression flag.
+    __ Srliw(temp, temp, 1u);    // Extract length.
+    __ Sllw(temp, temp, temp1);  // Calculate number of bytes to compare.
+  }
+
+  // Store offset of string value in preparation for comparison loop
+  __ Li(temp1, value_offset);
+
+  XRegister temp2 = srs.AllocateXRegister();
+  // Loop to compare strings 8 bytes at a time starting at the front of the string.
+  __ Bind(&loop);
+  __ Add(out, str, temp1);
+  __ Ld(out, out, 0);
+  __ Add(temp2, arg, temp1);
+  __ Ld(temp2, temp2, 0);
+  __ Addi(temp1, temp1, sizeof(uint64_t));
+  __ Bne(out, temp2, &return_false);
+  // With string compression, we have compared 8 bytes, otherwise 4 chars.
+  __ Addi(temp, temp, mirror::kUseStringCompression ? -8 : -4);
+  __ Bgt(temp, Zero, &loop);
+
+  // Return true and exit the function.
+  // If loop does not result in returning false, we return true.
+  __ Bind(&return_true);
+  __ Li(out, 1);
+  __ J(&end);
+
+  // Return false and exit the function.
+  __ Bind(&return_false);
+  __ Li(out, 0);
+  __ Bind(&end);
 }
 
 static void EmitStoreConditional(Riscv64Assembler* assembler,
@@ -1430,8 +1569,9 @@ static void GenSystemArrayCopyAddresses(CodeGeneratorRISCV64* codegen,
                                         XRegister src_base,
                                         XRegister dst_base,
                                         XRegister src_end) {
-  // This routine is used by the SystemArrayCopy and the SystemArrayCopyChar intrinsics.
-  DCHECK(type == DataType::Type::kReference || type == DataType::Type::kUint16)
+  // This routine is used by the SystemArrayCopyX intrinsics.
+  DCHECK(type == DataType::Type::kReference || type == DataType::Type::kInt8 ||
+         type == DataType::Type::kUint16 || type == DataType::Type::kInt32)
       << "Unexpected element type: " << type;
   const int32_t element_size = DataType::Size(type);
   const uint32_t data_offset = mirror::Array::DataOffset(element_size).Uint32Value();
@@ -1780,6 +1920,284 @@ void IntrinsicCodeGeneratorRISCV64::VisitSystemArrayCopy(HInvoke* invoke) {
   }
 
   __ Bind(intrinsic_slow_path->GetExitLabel());
+}
+
+// This value is in bytes and greater than ARRAYCOPY_SHORT_XXX_ARRAY_THRESHOLD
+// in libcore, so if we choose to jump to the slow path we will end up
+// in the native implementation.
+static constexpr int32_t kSystemArrayCopyPrimThreshold = 384;
+
+static void CreateSystemArrayCopyLocations(HInvoke* invoke, DataType::Type type) {
+  int32_t copy_threshold = kSystemArrayCopyPrimThreshold / DataType::Size(type);
+
+  // Check to see if we have known failures that will cause us to have to bail out
+  // to the runtime, and just generate the runtime call directly.
+  HIntConstant* src_pos = invoke->InputAt(1)->AsIntConstantOrNull();
+  HIntConstant* dst_pos = invoke->InputAt(3)->AsIntConstantOrNull();
+
+  // The positions must be non-negative.
+  if ((src_pos != nullptr && src_pos->GetValue() < 0) ||
+      (dst_pos != nullptr && dst_pos->GetValue() < 0)) {
+    // We will have to fail anyways.
+    return;
+  }
+
+  // The length must be >= 0 and not so long that we would (currently) prefer libcore's
+  // native implementation.
+  HIntConstant* length = invoke->InputAt(4)->AsIntConstantOrNull();
+  if (length != nullptr) {
+    int32_t len = length->GetValue();
+    if (len < 0 || len > copy_threshold) {
+      // Just call as normal.
+      return;
+    }
+  }
+
+  ArenaAllocator* allocator = invoke->GetBlock()->GetGraph()->GetAllocator();
+  LocationSummary* locations =
+      new (allocator) LocationSummary(invoke, LocationSummary::kCallOnSlowPath, kIntrinsified);
+  // arraycopy(char[] src, int src_pos, char[] dst, int dst_pos, int length).
+  locations->SetInAt(0, Location::RequiresRegister());
+  locations->SetInAt(1, LocationForSystemArrayCopyInput(invoke->InputAt(1)));
+  locations->SetInAt(2, Location::RequiresRegister());
+  locations->SetInAt(3, LocationForSystemArrayCopyInput(invoke->InputAt(3)));
+  locations->SetInAt(4, LocationForSystemArrayCopyInput(invoke->InputAt(4)));
+
+  locations->AddRegisterTemps(3);
+}
+
+void IntrinsicLocationsBuilderRISCV64::VisitSystemArrayCopyByte(HInvoke* invoke) {
+  CreateSystemArrayCopyLocations(invoke, DataType::Type::kInt8);
+}
+
+void IntrinsicLocationsBuilderRISCV64::VisitSystemArrayCopyChar(HInvoke* invoke) {
+  CreateSystemArrayCopyLocations(invoke, DataType::Type::kUint16);
+}
+
+void IntrinsicLocationsBuilderRISCV64::VisitSystemArrayCopyInt(HInvoke* invoke) {
+  CreateSystemArrayCopyLocations(invoke, DataType::Type::kInt32);
+}
+
+static void GenerateUnsignedLoad(
+    Riscv64Assembler* assembler, XRegister rd, XRegister rs1, int32_t offset, size_t type_size) {
+  switch (type_size) {
+    case 1:
+      __ Lbu(rd, rs1, offset);
+      break;
+    case 2:
+      __ Lhu(rd, rs1, offset);
+      break;
+    case 4:
+      __ Lwu(rd, rs1, offset);
+      break;
+    case 8:
+      __ Ld(rd, rs1, offset);
+      break;
+    default:
+      LOG(FATAL) << "Unexpected data type";
+  }
+}
+
+static void GenerateStore(
+    Riscv64Assembler* assembler, XRegister rs2, XRegister rs1, int32_t offset, size_t type_size) {
+  switch (type_size) {
+    case 1:
+      __ Sb(rs2, rs1, offset);
+      break;
+    case 2:
+      __ Sh(rs2, rs1, offset);
+      break;
+    case 4:
+      __ Sw(rs2, rs1, offset);
+      break;
+    case 8:
+      __ Sd(rs2, rs1, offset);
+      break;
+    default:
+      LOG(FATAL) << "Unexpected data type";
+  }
+}
+
+static void SystemArrayCopyPrimitive(HInvoke* invoke,
+                                     CodeGeneratorRISCV64* codegen,
+                                     DataType::Type type) {
+  Riscv64Assembler* assembler = codegen->GetAssembler();
+  LocationSummary* locations = invoke->GetLocations();
+  XRegister src = locations->InAt(0).AsRegister<XRegister>();
+  Location src_pos = locations->InAt(1);
+  XRegister dst = locations->InAt(2).AsRegister<XRegister>();
+  Location dst_pos = locations->InAt(3);
+  Location length = locations->InAt(4);
+
+  SlowPathCodeRISCV64* slow_path =
+      new (codegen->GetScopedAllocator()) IntrinsicSlowPathRISCV64(invoke);
+  codegen->AddSlowPath(slow_path);
+
+  SystemArrayCopyOptimizations optimizations(invoke);
+
+  // If source and destination are the same, take the slow path. Overlapping copy regions must be
+  // copied in reverse and we can't know in all cases if it's needed.
+  __ Beq(src, dst, slow_path->GetEntryLabel());
+
+  if (!optimizations.GetSourceIsNotNull()) {
+    // Bail out if the source is null.
+    __ Beqz(src, slow_path->GetEntryLabel());
+  }
+
+  if (!optimizations.GetDestinationIsNotNull() && !optimizations.GetDestinationIsSource()) {
+    // Bail out if the destination is null.
+    __ Beqz(dst, slow_path->GetEntryLabel());
+  }
+
+  int32_t copy_threshold = kSystemArrayCopyPrimThreshold / DataType::Size(type);
+  XRegister tmp = locations->GetTemp(0).AsRegister<XRegister>();
+  if (!length.IsConstant()) {
+    // Merge the following two comparisons into one:
+    //   If the length is negative, bail out (delegate to libcore's native implementation).
+    //   If the length >= kSystemArrayCopyPrimThreshold then (currently) prefer libcore's
+    //   native implementation.
+    __ Li(tmp, copy_threshold);
+    __ Bgeu(length.AsRegister<XRegister>(), tmp, slow_path->GetEntryLabel());
+  } else {
+    // We have already checked in the LocationsBuilder for the constant case.
+    DCHECK_GE(length.GetConstant()->AsIntConstant()->GetValue(), 0);
+    DCHECK_LE(length.GetConstant()->AsIntConstant()->GetValue(), copy_threshold);
+  }
+
+  XRegister src_curr_addr = locations->GetTemp(1).AsRegister<XRegister>();
+  XRegister dst_curr_addr = locations->GetTemp(2).AsRegister<XRegister>();
+
+  CheckSystemArrayCopyPosition(assembler,
+                               src,
+                               src_pos,
+                               length,
+                               slow_path,
+                               src_curr_addr,
+                               dst_curr_addr,
+                               /*length_is_array_length=*/ false,
+                               /*position_sign_checked=*/ false);
+
+  CheckSystemArrayCopyPosition(assembler,
+                               dst,
+                               dst_pos,
+                               length,
+                               slow_path,
+                               src_curr_addr,
+                               dst_curr_addr,
+                               /*length_is_array_length=*/ false,
+                               /*position_sign_checked=*/ false);
+
+  const int32_t element_size = DataType::Size(type);
+  const uint32_t data_offset = mirror::Array::DataOffset(element_size).Uint32Value();
+
+  GenArrayAddress(codegen, src_curr_addr, src, src_pos, type, data_offset);
+  GenArrayAddress(codegen, dst_curr_addr, dst, dst_pos, type, data_offset);
+
+  // We split processing of the array in two parts: head and tail.
+  // A first loop handles the head by copying a block of elements per
+  // iteration (see: elements_per_block).
+  // A second loop handles the tail by copying the remaining elements.
+  // If the copy length is not constant, we copy them one-by-one.
+  //
+  // Both loops are inverted for better performance, meaning they are
+  // implemented as conditional do-while loops.
+  // Here, the loop condition is first checked to determine if there are
+  // sufficient elements to run an iteration, then we enter the do-while: an
+  // iteration is performed followed by a conditional branch only if another
+  // iteration is necessary. As opposed to a standard while-loop, this inversion
+  // can save some branching (e.g. we don't branch back to the initial condition
+  // at the end of every iteration only to potentially immediately branch
+  // again).
+  //
+  // A full block of elements is subtracted and added before and after the head
+  // loop, respectively. This ensures that any remaining length after each
+  // head loop iteration means there is a full block remaining, reducing the
+  // number of conditional checks required on every iteration.
+  ScratchRegisterScope temps(assembler);
+  constexpr int32_t bytes_copied_per_iteration = 16;
+  DCHECK_EQ(bytes_copied_per_iteration % element_size, 0);
+  int32_t elements_per_block = bytes_copied_per_iteration / element_size;
+  Riscv64Label done;
+
+  XRegister length_tmp = temps.AllocateXRegister();
+
+  auto emit_head_loop = [&]() {
+    ScratchRegisterScope local_temps(assembler);
+    XRegister tmp2 = local_temps.AllocateXRegister();
+
+    Riscv64Label loop;
+    __ Bind(&loop);
+    __ Ld(tmp, src_curr_addr, 0);
+    __ Ld(tmp2, src_curr_addr, 8);
+    __ Sd(tmp, dst_curr_addr, 0);
+    __ Sd(tmp2, dst_curr_addr, 8);
+    __ Addi(length_tmp, length_tmp, -elements_per_block);
+    __ Addi(src_curr_addr, src_curr_addr, bytes_copied_per_iteration);
+    __ Addi(dst_curr_addr, dst_curr_addr, bytes_copied_per_iteration);
+    __ Bgez(length_tmp, &loop);
+  };
+
+  auto emit_tail_loop = [&]() {
+    Riscv64Label loop;
+    __ Bind(&loop);
+    GenerateUnsignedLoad(assembler, tmp, src_curr_addr, 0, element_size);
+    GenerateStore(assembler, tmp, dst_curr_addr, 0, element_size);
+    __ Addi(length_tmp, length_tmp, -1);
+    __ Addi(src_curr_addr, src_curr_addr, element_size);
+    __ Addi(dst_curr_addr, dst_curr_addr, element_size);
+    __ Bgtz(length_tmp, &loop);
+  };
+
+  auto emit_unrolled_tail_loop = [&](int32_t tail_length) {
+    DCHECK_LT(tail_length, elements_per_block);
+
+    int32_t length_in_bytes = tail_length * element_size;
+    size_t offset = 0;
+    for (size_t operation_size = 8; operation_size > 0; operation_size >>= 1) {
+      if ((length_in_bytes & operation_size) != 0) {
+        GenerateUnsignedLoad(assembler, tmp, src_curr_addr, offset, operation_size);
+        GenerateStore(assembler, tmp, dst_curr_addr, offset, operation_size);
+        offset += operation_size;
+      }
+    }
+  };
+
+  if (length.IsConstant()) {
+    const int32_t constant_length = length.GetConstant()->AsIntConstant()->GetValue();
+    if (constant_length >= elements_per_block) {
+      __ Li(length_tmp, constant_length - elements_per_block);
+      emit_head_loop();
+    }
+    emit_unrolled_tail_loop(constant_length % elements_per_block);
+  } else {
+    Riscv64Label tail_loop;
+    XRegister length_reg = length.AsRegister<XRegister>();
+    __ Addi(length_tmp, length_reg, -elements_per_block);
+    __ Bltz(length_tmp, &tail_loop);
+
+    emit_head_loop();
+
+    __ Bind(&tail_loop);
+    __ Addi(length_tmp, length_tmp, elements_per_block);
+    __ Beqz(length_tmp, &done);
+
+    emit_tail_loop();
+  }
+
+  __ Bind(&done);
+  __ Bind(slow_path->GetExitLabel());
+}
+
+void IntrinsicCodeGeneratorRISCV64::VisitSystemArrayCopyByte(HInvoke* invoke) {
+  SystemArrayCopyPrimitive(invoke, codegen_, DataType::Type::kInt8);
+}
+
+void IntrinsicCodeGeneratorRISCV64::VisitSystemArrayCopyChar(HInvoke* invoke) {
+  SystemArrayCopyPrimitive(invoke, codegen_, DataType::Type::kUint16);
+}
+
+void IntrinsicCodeGeneratorRISCV64::VisitSystemArrayCopyInt(HInvoke* invoke) {
+  SystemArrayCopyPrimitive(invoke, codegen_, DataType::Type::kInt32);
 }
 
 enum class GetAndUpdateOp {
@@ -2681,6 +3099,208 @@ void IntrinsicCodeGeneratorRISCV64::VisitJdkUnsafeGetAndSetReference(HInvoke* in
   GenUnsafeGetAndUpdate(invoke, DataType::Type::kReference, codegen_, GetAndUpdateOp::kSet);
 }
 
+void IntrinsicLocationsBuilderRISCV64::VisitStringCompareTo(HInvoke* invoke) {
+  LocationSummary* locations =
+      new (allocator_) LocationSummary(invoke,
+                                       invoke->InputAt(1)->CanBeNull()
+                                           ? LocationSummary::kCallOnSlowPath
+                                           : LocationSummary::kNoCall,
+                                       kIntrinsified);
+  locations->SetInAt(0, Location::RequiresRegister());
+  locations->SetInAt(1, Location::RequiresRegister());
+  locations->AddRegisterTemps(3);
+  // Need temporary registers for String compression's feature.
+  if (mirror::kUseStringCompression) {
+    locations->AddTemp(Location::RequiresRegister());
+  }
+  locations->SetOut(Location::RequiresRegister(), Location::kOutputOverlap);
+}
+
+void IntrinsicCodeGeneratorRISCV64::VisitStringCompareTo(HInvoke* invoke) {
+  Riscv64Assembler* assembler = GetAssembler();
+  DCHECK(assembler->IsExtensionEnabled(Riscv64Extension::kZbb));
+  LocationSummary* locations = invoke->GetLocations();
+
+  XRegister str = locations->InAt(0).AsRegister<XRegister>();
+  XRegister arg = locations->InAt(1).AsRegister<XRegister>();
+  XRegister out = locations->Out().AsRegister<XRegister>();
+
+  XRegister temp0 = locations->GetTemp(0).AsRegister<XRegister>();
+  XRegister temp1 = locations->GetTemp(1).AsRegister<XRegister>();
+  XRegister temp2 = locations->GetTemp(2).AsRegister<XRegister>();
+  XRegister temp3 = kNoXRegister;
+  if (mirror::kUseStringCompression) {
+    temp3 = locations->GetTemp(3).AsRegister<XRegister>();
+  }
+
+  Riscv64Label loop;
+  Riscv64Label find_char_diff;
+  Riscv64Label end;
+  Riscv64Label different_compression;
+
+  // Get offsets of count and value fields within a string object.
+  const int32_t count_offset = mirror::String::CountOffset().Int32Value();
+  const int32_t value_offset = mirror::String::ValueOffset().Int32Value();
+
+  // Note that the null check must have been done earlier.
+  DCHECK(!invoke->CanDoImplicitNullCheckOn(invoke->InputAt(0)));
+
+  // Take slow path and throw if input can be and is null.
+  SlowPathCodeRISCV64* slow_path = nullptr;
+  const bool can_slow_path = invoke->InputAt(1)->CanBeNull();
+  if (can_slow_path) {
+    slow_path = new (codegen_->GetScopedAllocator()) IntrinsicSlowPathRISCV64(invoke);
+    codegen_->AddSlowPath(slow_path);
+    __ Beqz(arg, slow_path->GetEntryLabel());
+  }
+
+  // Reference equality check, return 0 if same reference.
+  __ Sub(out, str, arg);
+  __ Beqz(out, &end);
+
+  if (mirror::kUseStringCompression) {
+    // Load `count` fields of this and argument strings.
+    __ Loadwu(temp3, str, count_offset);
+    __ Loadwu(temp2, arg, count_offset);
+    // Clean out compression flag from lengths.
+    __ Srliw(temp0, temp3, 1u);
+    __ Srliw(temp1, temp2, 1u);
+  } else {
+    // Load lengths of this and argument strings.
+    __ Loadwu(temp0, str, count_offset);
+    __ Loadwu(temp1, arg, count_offset);
+  }
+  // out = length diff.
+  __ Subw(out, temp0, temp1);
+
+  // Find the length of the shorter string
+  __ Minu(temp0, temp0, temp1);
+  // Shorter string is empty?
+  __ Beqz(temp0, &end);
+
+  if (mirror::kUseStringCompression) {
+    // Extract both compression flags
+    __ Andi(temp3, temp3, 1);
+    __ Andi(temp2, temp2, 1);
+    __ Bne(temp2, temp3, &different_compression);
+  }
+  // Store offset of string value in preparation for comparison loop.
+  __ Li(temp1, value_offset);
+  if (mirror::kUseStringCompression) {
+    // For string compression, calculate the number of bytes to compare (not chars).
+    __ Sll(temp0, temp0, temp3);
+  }
+
+  // Assertions that must hold in order to compare strings 8 bytes at a time.
+  DCHECK_ALIGNED(value_offset, 8);
+  static_assert(IsAligned<8>(kObjectAlignment), "String of odd length is not zero padded");
+
+  constexpr size_t char_size = DataType::Size(DataType::Type::kUint16);
+  static_assert(char_size == 2u, "Char expected to be 2 bytes wide");
+
+  ScratchRegisterScope scratch_scope(assembler);
+  XRegister temp4 = scratch_scope.AllocateXRegister();
+
+  // Loop to compare 4x16-bit characters at a time (ok because of string data alignment).
+  __ Bind(&loop);
+  __ Add(temp4, str, temp1);
+  __ Ld(temp4, temp4, 0);
+  __ Add(temp2, arg, temp1);
+  __ Ld(temp2, temp2, 0);
+  __ Bne(temp4, temp2, &find_char_diff);
+  __ Addi(temp1, temp1, char_size * 4);
+  // With string compression, we have compared 8 bytes, otherwise 4 chars.
+  __ Addi(temp0, temp0, (mirror::kUseStringCompression) ? -8 : -4);
+  __ Bgtz(temp0, &loop);
+  __ J(&end);
+
+  // Find the single character difference.
+  __ Bind(&find_char_diff);
+  // Get the bit position of the first character that differs.
+  __ Xor(temp1, temp2, temp4);
+  __ Ctz(temp1, temp1);
+
+  // If the number of chars remaining <= the index where the difference occurs (0-3), then
+  // the difference occurs outside the remaining string data, so just return length diff (out).
+  __ Srliw(temp1, temp1, (mirror::kUseStringCompression) ? 3 : 4);
+  __ Ble(temp0, temp1, &end);
+
+  // Extract the characters and calculate the difference.
+  __ Slliw(temp1, temp1, (mirror::kUseStringCompression) ? 3 : 4);
+  if (mirror:: kUseStringCompression) {
+    __ Slliw(temp3, temp3, 3u);
+    __ Andn(temp1, temp1, temp3);
+  }
+  __ Srl(temp2, temp2, temp1);
+  __ Srl(temp4, temp4, temp1);
+  if (mirror::kUseStringCompression) {
+    __ Li(temp0, -256);           // ~0xff
+    __ Sllw(temp0, temp0, temp3);  // temp3 = 0 or 8, temp0 := ~0xff or ~0xffff
+    __ Andn(temp4, temp4, temp0);  // Extract 8 or 16 bits.
+    __ Andn(temp2, temp2, temp0);  // Extract 8 or 16 bits.
+  } else {
+    __ ZextH(temp4, temp4);
+    __ ZextH(temp2, temp2);
+  }
+
+  __ Subw(out, temp4, temp2);
+
+  if (mirror::kUseStringCompression) {
+    __ J(&end);
+    __ Bind(&different_compression);
+
+    // Comparison for different compression style.
+    constexpr size_t c_char_size = DataType::Size(DataType::Type::kInt8);
+    static_assert(c_char_size == 1u, "Compressed char expected to be 1 byte wide");
+
+    // `temp1` will hold the compressed data pointer, `temp2` the uncompressed data pointer.
+    __ Xor(temp4, str, arg);
+    __ Addi(temp3, temp3, -1);    // -1 if str is compressed, 0 otherwise
+    __ And(temp2, temp4, temp3);  // str^arg if str is compressed, 0 otherwise
+    __ Xor(temp1, temp2, arg);    // str if str is compressed, arg otherwise
+    __ Xor(temp2, temp2, str);    // arg if str is compressed, str otherwise
+
+    // We want to free up the temp3, currently holding `str` compression flag, for comparison.
+    // So, we move it to the bottom bit of the iteration count `temp0` which we then need to treat
+    // as unsigned. This will allow `addi temp0, temp0, -2; bgtz different_compression_loop`
+    // to serve as the loop condition.
+    __ Sh1Add(temp0, temp0, temp3);
+
+    // Adjust temp1 and temp2 from string pointers to data pointers.
+    __ Addi(temp1, temp1, value_offset);
+    __ Addi(temp2, temp2, value_offset);
+
+    Riscv64Label different_compression_loop;
+    Riscv64Label different_compression_diff;
+
+    __ Bind(&different_compression_loop);
+    __ Lbu(temp4, temp1, 0);
+    __ Addiw(temp1, temp1, c_char_size);
+    __ Lhu(temp3, temp2, 0);
+    __ Addi(temp2, temp2, char_size);
+    __ Sub(temp4, temp4, temp3);
+    __ Bnez(temp4, &different_compression_diff);
+    __ Addi(temp0, temp0, -2);
+    __ Bgtz(temp0, &different_compression_loop);
+    __ J(&end);
+
+    // Calculate the difference.
+    __ Bind(&different_compression_diff);
+    static_assert(static_cast<uint32_t>(mirror::StringCompressionFlag::kCompressed) == 0u,
+                  "Expecting 0=compressed, 1=uncompressed");
+    __ Andi(temp0, temp0, 1);
+    __ Addi(temp0, temp0, -1);
+    __ Xor(out, temp4, temp0);
+    __ Sub(out, out, temp0);
+  }
+
+  __ Bind(&end);
+
+  if (can_slow_path) {
+    __ Bind(slow_path->GetExitLabel());
+  }
+}
+
 class VarHandleSlowPathRISCV64 : public IntrinsicSlowPathRISCV64 {
  public:
   VarHandleSlowPathRISCV64(HInvoke* invoke, std::memory_order order)
@@ -2878,7 +3498,7 @@ static void GenerateVarHandleInstanceFieldChecks(HInvoke* invoke,
     __ Beqz(object, slow_path->GetEntryLabel());
   }
 
-  if (!optimizations.GetUseKnownBootImageVarHandle()) {
+  if (!optimizations.GetUseKnownImageVarHandle()) {
     ScratchRegisterScope srs(assembler);
     XRegister temp = srs.AllocateXRegister();
 
@@ -3001,7 +3621,7 @@ static VarHandleSlowPathRISCV64* GenerateVarHandleChecks(HInvoke* invoke,
                                                          DataType::Type type) {
   size_t expected_coordinates_count = GetExpectedVarHandleCoordinatesCount(invoke);
   VarHandleOptimizations optimizations(invoke);
-  if (optimizations.GetUseKnownBootImageVarHandle()) {
+  if (optimizations.GetUseKnownImageVarHandle()) {
     DCHECK_NE(expected_coordinates_count, 2u);
     if (expected_coordinates_count == 0u || optimizations.GetSkipObjectNullCheck()) {
       return nullptr;
@@ -3012,7 +3632,7 @@ static VarHandleSlowPathRISCV64* GenerateVarHandleChecks(HInvoke* invoke,
       new (codegen->GetScopedAllocator()) VarHandleSlowPathRISCV64(invoke, order);
   codegen->AddSlowPath(slow_path);
 
-  if (!optimizations.GetUseKnownBootImageVarHandle()) {
+  if (!optimizations.GetUseKnownImageVarHandle()) {
     GenerateVarHandleAccessModeAndVarTypeChecks(invoke, codegen, slow_path, type);
   }
   GenerateVarHandleCoordinateChecks(invoke, codegen, slow_path);
@@ -3048,7 +3668,7 @@ static void GenerateVarHandleTarget(HInvoke* invoke,
   size_t expected_coordinates_count = GetExpectedVarHandleCoordinatesCount(invoke);
 
   if (expected_coordinates_count <= 1u) {
-    if (VarHandleOptimizations(invoke).GetUseKnownBootImageVarHandle()) {
+    if (VarHandleOptimizations(invoke).GetUseKnownImageVarHandle()) {
       ScopedObjectAccess soa(Thread::Current());
       ArtField* target_field = GetBootImageVarHandleField(invoke);
       if (expected_coordinates_count == 0u) {
@@ -3843,7 +4463,7 @@ static void CreateVarHandleGetAndUpdateLocations(HInvoke* invoke,
   }
 
   LocationSummary* locations = CreateVarHandleCommonLocations(invoke, codegen);
-  uint32_t arg_index = invoke->GetNumberOfArguments() - 1;
+  uint32_t arg_index = invoke->GetNumberOfArguments() - 1u;
   DCHECK_EQ(arg_index, 1u + GetExpectedVarHandleCoordinatesCount(invoke));
   DataType::Type value_type = invoke->GetType();
   DCHECK_EQ(value_type, GetDataTypeFromShorty(invoke, arg_index));
@@ -3853,7 +4473,7 @@ static void CreateVarHandleGetAndUpdateLocations(HInvoke* invoke,
   if (is_fp) {
     if (get_and_update_op == GetAndUpdateOp::kAdd) {
       // For ADD, do not use ZR for zero bit pattern (+0.0f or +0.0).
-      locations->SetInAt(invoke->GetNumberOfArguments() - 1u, Location::RequiresFpuRegister());
+      locations->SetInAt(arg_index, Location::RequiresFpuRegister());
     } else {
       DCHECK(get_and_update_op == GetAndUpdateOp::kSet);
     }
@@ -4068,6 +4688,9 @@ static void GenerateVarHandleGetAndUpdate(HInvoke* invoke,
           ftmp, out.AsFpuRegister<FRegister>(), arg.AsFpuRegister<FRegister>(), value_type);
       codegen->MoveLocation(
           Location::RegisterLocation(new_value), Location::FpuRegisterLocation(ftmp), op_type);
+    } else if (arg.IsConstant()) {
+      DCHECK(arg.GetConstant()->IsZeroBitPattern());
+      __ Mv(new_value, out.AsRegister<XRegister>());
     } else if (value_type == DataType::Type::kInt64) {
       __ Add(new_value, out.AsRegister<XRegister>(), arg.AsRegister<XRegister>());
     } else {
@@ -4718,6 +5341,269 @@ void IntrinsicCodeGeneratorRISCV64::VisitMathMultiplyHigh(HInvoke* invoke) {
 
   // Get high 64 of the multiply
   __ Mulh(out, x, y);
+}
+
+void IntrinsicLocationsBuilderRISCV64::VisitStringGetCharsNoCheck(HInvoke* invoke) {
+  LocationSummary* locations =
+      new (allocator_) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
+
+  locations->SetInAt(0, Location::RequiresRegister());
+  locations->SetInAt(1, Location::RequiresRegister());
+  locations->SetInAt(2, Location::RequiresRegister());
+  locations->SetInAt(3, Location::RequiresRegister());
+  locations->SetInAt(4, Location::RequiresRegister());
+
+  locations->AddRegisterTemps(3);
+}
+
+void IntrinsicCodeGeneratorRISCV64::VisitStringGetCharsNoCheck(HInvoke* invoke) {
+  Riscv64Assembler* assembler = GetAssembler();
+  LocationSummary* locations = invoke->GetLocations();
+
+  // In Java sizeof(Char) is 2.
+  constexpr size_t char_size = DataType::Size(DataType::Type::kUint16);
+  static_assert(char_size == 2u);
+
+  // Location of data in the destination char array buffer.
+  const uint32_t array_data_offset = mirror::Array::DataOffset(char_size).Uint32Value();
+
+  // Location of char array data in the source string.
+  const uint32_t string_value_offset = mirror::String::ValueOffset().Uint32Value();
+
+  // void getCharsNoCheck(int srcBegin, int srcEnd, char[] dst, int dstBegin);
+
+  // The source string.
+  XRegister source_string_object = locations->InAt(0).AsRegister<XRegister>();
+  // Index of the first character.
+  XRegister source_begin_index = locations->InAt(1).AsRegister<XRegister>();
+  // Index that immediately follows the last character.
+  XRegister source_end_index = locations->InAt(2).AsRegister<XRegister>();
+  // The destination array.
+  XRegister destination_array_object = locations->InAt(3).AsRegister<XRegister>();
+  // The start offset in the destination array.
+  XRegister destination_begin_offset = locations->InAt(4).AsRegister<XRegister>();
+
+  XRegister source_ptr = locations->GetTemp(0).AsRegister<XRegister>();
+  XRegister destination_ptr = locations->GetTemp(1).AsRegister<XRegister>();
+  XRegister number_of_chars = locations->GetTemp(2).AsRegister<XRegister>();
+
+  ScratchRegisterScope temps(assembler);
+  XRegister tmp = temps.AllocateXRegister();
+
+  Riscv64Label done;
+
+  // Calculate the length(number_of_chars) of the string.
+  __ Subw(number_of_chars, source_end_index, source_begin_index);
+
+  // If the string has zero length then exit.
+  __ Beqz(number_of_chars, &done);
+
+  // Prepare a register with the destination address
+  // to start copying to the address:
+  // 1. set the address from which the data in the
+  //    destination array begins (destination_array_object + array_data_offset);
+  __ Addi(destination_ptr, destination_array_object, array_data_offset);
+  // 2. it is necessary to add the start offset relative to the beginning
+  //    of the data in the destination array,
+  //    yet, due to sizeof(Char) being 2, formerly scaling must be performed
+  //    (destination_begin_offset * 2 that equals to destination_begin_offset << 1);
+  __ Sh1Add(destination_ptr, destination_begin_offset, destination_ptr);
+
+  // Prepare a register with the source address
+  // to start copying from the address:
+  // 1. set the address from which the data in the
+  //    source string begins (source_string_object + string_value_offset).
+  // Other manipulations will be performed later,
+  // since they depend on whether the string is compressed or not.
+  __ Addi(source_ptr, source_string_object, string_value_offset);
+
+  // The string can be compressed. It is a way to store strings more compactly.
+  // In this instance, every character is located in one byte (instead of two).
+  Riscv64Label compressed_string_preloop;
+
+  // Information about whether the string is compressed or not is located
+  // in the area intended for storing the length of the string.
+  // The least significant bit of the string's length is used
+  // as the compression flag if STRING_COMPRESSION_ENABLED.
+  if (mirror::kUseStringCompression) {
+    // Location of count in string.
+    const uint32_t count_offset = mirror::String::CountOffset().Uint32Value();
+    // String's length.
+    __ Loadwu(tmp, source_string_object, count_offset);
+
+    // Checking the string for compression.
+    // If so, move to the "compressed_string_preloop".
+    __ Andi(tmp, tmp, 0x1);
+    __ Beqz(tmp, &compressed_string_preloop);
+  }
+
+  // Continue preparing the source register:
+  // proceed similarly to what was done for the destination register.
+  __ Sh1Add(source_ptr, source_begin_index, source_ptr);
+
+  // If the string is not compressed, then perform ordinary copying.
+  // Copying will occur 4 characters (8 bytes) at a time, immediately after there are
+  // less than 4 characters left, move to the "remainder_loop" and copy the remaining
+  // characters one character (2 bytes) at a time.
+  // Note: Unaligned addresses are acceptable here and it is not required to embed
+  // additional code to correct them.
+  Riscv64Label main_loop;
+  Riscv64Label remainder_loop;
+
+  // If initially there are less than 4 characters,
+  // then we directly calculate the remainder.
+  __ Addi(tmp, number_of_chars, -4);
+  __ Bltz(tmp, &remainder_loop);
+
+  // Otherwise, save the value to the counter and continue.
+  __ Mv(number_of_chars, tmp);
+
+  // Main loop. Loads and stores 4 16-bit Java characters at a time.
+  __ Bind(&main_loop);
+
+  __ Loadd(tmp, source_ptr, 0);
+  __ Addi(source_ptr, source_ptr, char_size * 4);
+  __ Stored(tmp, destination_ptr, 0);
+  __ Addi(destination_ptr, destination_ptr, char_size * 4);
+
+  __ Addi(number_of_chars, number_of_chars, -4);
+
+  __ Bgez(number_of_chars, &main_loop);
+
+  // Restore the previous counter value.
+  __ Addi(number_of_chars, number_of_chars, 4);
+  __ Beqz(number_of_chars, &done);
+
+  // Remainder loop for < 4 characters case and remainder handling.
+  // Loads and stores one 16-bit Java character at a time.
+  __ Bind(&remainder_loop);
+
+  __ Loadhu(tmp, source_ptr, 0);
+  __ Addi(source_ptr, source_ptr, char_size);
+
+  __ Storeh(tmp, destination_ptr, 0);
+  __ Addi(destination_ptr, destination_ptr, char_size);
+
+  __ Addi(number_of_chars, number_of_chars, -1);
+  __ Bgtz(number_of_chars, &remainder_loop);
+
+  Riscv64Label compressed_string_loop;
+  if (mirror::kUseStringCompression) {
+    __ J(&done);
+
+    // Below is the copying under the string compression circumstance mentioned above.
+    // Every character in the source string occupies only one byte (instead of two).
+    constexpr size_t compressed_char_size = DataType::Size(DataType::Type::kInt8);
+    static_assert(compressed_char_size == 1u);
+
+    __ Bind(&compressed_string_preloop);
+
+    // Continue preparing the source register:
+    // proceed identically to what was done for the destination register,
+    // yet take into account that only one byte yields for every source character,
+    // hence we need to extend it to two ones when copying it to the destination address.
+    // Against this background scaling for source_begin_index is not needed.
+    __ Add(source_ptr, source_ptr, source_begin_index);
+
+    // Copy loop for compressed strings. Copying one 8-bit character to 16-bit one at a time.
+    __ Bind(&compressed_string_loop);
+
+    __ Loadbu(tmp, source_ptr, 0);
+    __ Addi(source_ptr, source_ptr, compressed_char_size);
+    __ Storeh(tmp, destination_ptr, 0);
+    __ Addi(destination_ptr, destination_ptr, char_size);
+
+    __ Addi(number_of_chars, number_of_chars, -1);
+    __ Bgtz(number_of_chars, &compressed_string_loop);
+  }
+
+  __ Bind(&done);
+}
+
+void GenMathSignum(CodeGeneratorRISCV64* codegen, HInvoke* invoke, DataType::Type type) {
+  LocationSummary* locations = invoke->GetLocations();
+  DCHECK(locations->InAt(0).Equals(locations->Out()));
+  FRegister in = locations->InAt(0).AsFpuRegister<FRegister>();
+  Riscv64Assembler* assembler = codegen->GetAssembler();
+  ScratchRegisterScope srs(assembler);
+  XRegister tmp = srs.AllocateXRegister();
+  FRegister ftmp = srs.AllocateFRegister();
+  Riscv64Label done;
+
+  if (type == DataType::Type::kFloat64) {
+    // 0x3FF0000000000000L = 1.0
+    __ Li(tmp, 0x3FF0000000000000L);
+    __ FMvDX(ftmp, tmp);
+    __ FClassD(tmp, in);
+  } else {
+    // 0x3f800000 = 1.0f
+    __ Li(tmp, 0x3F800000);
+    __ FMvWX(ftmp, tmp);
+    __ FClassS(tmp, in);
+  }
+
+  __ Andi(tmp, tmp, kPositiveZero | kNegativeZero | kSignalingNaN | kQuietNaN);
+  __ Bnez(tmp, &done);
+
+  if (type == DataType::Type::kFloat64) {
+    __ FSgnjD(in, ftmp, in);
+  } else {
+    __ FSgnjS(in, ftmp, in);
+  }
+
+  __ Bind(&done);
+}
+
+void IntrinsicLocationsBuilderRISCV64::VisitMathSignumDouble(HInvoke* invoke) {
+  LocationSummary* locations =
+      new (allocator_) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
+  locations->SetInAt(0, Location::RequiresFpuRegister());
+  locations->SetOut(Location::SameAsFirstInput());
+}
+
+void IntrinsicCodeGeneratorRISCV64::VisitMathSignumDouble(HInvoke* invoke) {
+  GenMathSignum(codegen_, invoke, DataType::Type::kFloat64);
+}
+
+void IntrinsicLocationsBuilderRISCV64::VisitMathSignumFloat(HInvoke* invoke) {
+  LocationSummary* locations =
+      new (allocator_) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
+  locations->SetInAt(0, Location::RequiresFpuRegister());
+  locations->SetOut(Location::SameAsFirstInput());
+}
+
+void IntrinsicCodeGeneratorRISCV64::VisitMathSignumFloat(HInvoke* invoke) {
+  GenMathSignum(codegen_, invoke, DataType::Type::kFloat32);
+}
+
+void GenMathCopySign(CodeGeneratorRISCV64* codegen, HInvoke* invoke, DataType::Type type) {
+  Riscv64Assembler* assembler = codegen->GetAssembler();
+  LocationSummary* locations = invoke->GetLocations();
+  FRegister in0 = locations->InAt(0).AsFpuRegister<FRegister>();
+  FRegister in1 = locations->InAt(1).AsFpuRegister<FRegister>();
+  FRegister out = locations->Out().AsFpuRegister<FRegister>();
+
+  if (type == DataType::Type::kFloat64) {
+    __ FSgnjD(out, in0, in1);
+  } else {
+    __ FSgnjS(out, in0, in1);
+  }
+}
+
+void IntrinsicLocationsBuilderRISCV64::VisitMathCopySignDouble(HInvoke* invoke) {
+  CreateFPFPToFPCallLocations(allocator_, invoke);
+}
+
+void IntrinsicCodeGeneratorRISCV64::VisitMathCopySignDouble(HInvoke* invoke) {
+  GenMathCopySign(codegen_, invoke, DataType::Type::kFloat64);
+}
+
+void IntrinsicLocationsBuilderRISCV64::VisitMathCopySignFloat(HInvoke* invoke) {
+  CreateFPFPToFPCallLocations(allocator_, invoke);
+}
+
+void IntrinsicCodeGeneratorRISCV64::VisitMathCopySignFloat(HInvoke* invoke) {
+  GenMathCopySign(codegen_, invoke, DataType::Type::kFloat32);
 }
 
 #define MARK_UNIMPLEMENTED(Name) UNIMPLEMENTED_INTRINSIC(RISCV64, Name)

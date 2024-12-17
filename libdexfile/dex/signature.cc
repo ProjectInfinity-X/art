@@ -21,8 +21,6 @@
 #include <ostream>
 #include <type_traits>
 
-#include "base/string_view_cpp20.h"
-
 namespace art {
 
 using dex::TypeList;
@@ -39,11 +37,11 @@ std::string Signature::ToString() const {
   } else {
     result += "(";
     for (uint32_t i = 0; i < params->Size(); ++i) {
-      result += dex_file_->StringByTypeIdx(params->GetTypeItem(i).type_idx_);
+      result += dex_file_->GetTypeDescriptorView(params->GetTypeItem(i).type_idx_);
     }
     result += ")";
   }
-  result += dex_file_->StringByTypeIdx(proto_id_->return_type_idx_);
+  result += dex_file_->GetTypeDescriptorView(proto_id_->return_type_idx_);
   return result;
 }
 
@@ -62,25 +60,25 @@ bool Signature::operator==(std::string_view rhs) const {
     return false;
   }
   std::string_view tail(rhs);
-  if (!StartsWith(tail, "(")) {
+  if (!tail.starts_with("(")) {
     return false;  // Invalid signature
   }
   tail.remove_prefix(1);  // "(";
   const TypeList* params = dex_file_->GetProtoParameters(*proto_id_);
   if (params != nullptr) {
     for (uint32_t i = 0; i < params->Size(); ++i) {
-      std::string_view param(dex_file_->StringByTypeIdx(params->GetTypeItem(i).type_idx_));
-      if (!StartsWith(tail, param)) {
+      std::string_view param = dex_file_->GetTypeDescriptorView(params->GetTypeItem(i).type_idx_);
+      if (!tail.starts_with(param)) {
         return false;
       }
       tail.remove_prefix(param.length());
     }
   }
-  if (!StartsWith(tail, ")")) {
+  if (!tail.starts_with(")")) {
     return false;
   }
   tail.remove_prefix(1);  // ")";
-  return tail == dex_file_->StringByTypeIdx(proto_id_->return_type_idx_);
+  return tail == dex_file_->GetTypeDescriptorView(proto_id_->return_type_idx_);
 }
 
 std::ostream& operator<<(std::ostream& os, const Signature& sig) {

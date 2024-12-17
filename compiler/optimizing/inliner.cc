@@ -17,8 +17,8 @@
 #include "inliner.h"
 
 #include "art_method-inl.h"
-#include "base/enums.h"
 #include "base/logging.h"
+#include "base/pointer_size.h"
 #include "builder.h"
 #include "class_linker.h"
 #include "class_root-inl.h"
@@ -684,7 +684,6 @@ bool HInliner::TryInlineFromInlineCache(HInvoke* invoke_instruction)
       return false;
     }
   }
-  UNREACHABLE();
 }
 
 HInliner::InlineCacheType HInliner::GetInlineCacheJIT(
@@ -1344,6 +1343,13 @@ bool HInliner::TryDevirtualize(HInvoke* invoke_instruction,
     return false;
   }
 
+  // Don't devirtualize to an intrinsic invalid after the builder phase. The ArtMethod might be an
+  // intrinsic even when the HInvoke isn't e.g. java.lang.CharSequence.isEmpty (not an intrinsic)
+  // can get devirtualized into java.lang.String.isEmpty (which is an intrinsic).
+  if (method->IsIntrinsic() && !IsValidIntrinsicAfterBuilder(method->GetIntrinsic())) {
+    return false;
+  }
+
   // Don't bother trying to call directly a default conflict method. It
   // doesn't have a proper MethodReference, but also `GetCanonicalMethod`
   // will return an actual default implementation.
@@ -1591,7 +1597,7 @@ bool HInliner::TryBuildAndInline(HInvoke* invoke_instruction,
   // another chance before we try to inline it.
   if (invoke_instruction->GetResolvedMethod() != method &&
       method->IsIntrinsic() &&
-      IsValidIntrinsicAfterBuilder(static_cast<Intrinsics>(method->GetIntrinsic()))) {
+      IsValidIntrinsicAfterBuilder(method->GetIntrinsic())) {
     MaybeRecordStat(stats_, MethodCompilationStat::kIntrinsicRecognized);
     // For simplicity, always create a new instruction to replace the existing
     // invoke.
@@ -1695,6 +1701,7 @@ bool HInliner::TryPatternSubstitution(HInvoke* invoke_instruction,
     return false;
   }
 
+  size_t number_of_instructions = 0u;  // Note: We do not count constants.
   switch (inline_method.opcode) {
     case kInlineOpNop:
       DCHECK_EQ(invoke_instruction->GetType(), DataType::Type::kVoid);
@@ -1729,6 +1736,7 @@ bool HInliner::TryPatternSubstitution(HInvoke* invoke_instruction,
       DCHECK_EQ(iget->IsVolatile() ? 1u : 0u, data.is_volatile);
       invoke_instruction->GetBlock()->InsertInstructionBefore(iget, invoke_instruction);
       *return_replacement = iget;
+      number_of_instructions = 1u;
       break;
     }
     case kInlineOpIPut: {
@@ -1747,6 +1755,7 @@ bool HInliner::TryPatternSubstitution(HInvoke* invoke_instruction,
         size_t return_arg = data.return_arg_plus1 - 1u;
         *return_replacement = GetInvokeInputForArgVRegIndex(invoke_instruction, return_arg);
       }
+      number_of_instructions = 1u;
       break;
     }
     case kInlineOpConstructor: {
@@ -1801,11 +1810,13 @@ bool HInliner::TryPatternSubstitution(HInvoke* invoke_instruction,
                                                                 invoke_instruction);
       }
       *return_replacement = nullptr;
+      number_of_instructions = number_of_iputs + (needs_constructor_barrier ? 1u : 0u);
       break;
     }
-    default:
-      LOG(FATAL) << "UNREACHABLE";
-      UNREACHABLE();
+  }
+  if (number_of_instructions != 0u) {
+    total_number_of_instructions_ += number_of_instructions;
+    UpdateInliningBudget();
   }
   return true;
 }

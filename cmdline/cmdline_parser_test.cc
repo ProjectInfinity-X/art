@@ -36,13 +36,11 @@ namespace art {
   // This has a gtest dependency, which is why it's in the gtest only.
   bool operator==(const ProfileSaverOptions& lhs, const ProfileSaverOptions& rhs) {
     return lhs.enabled_ == rhs.enabled_ &&
-        lhs.min_save_period_ms_ == rhs.min_save_period_ms_ &&
-        lhs.save_resolved_classes_delay_ms_ == rhs.save_resolved_classes_delay_ms_ &&
-        lhs.hot_startup_method_samples_ == rhs.hot_startup_method_samples_ &&
-        lhs.min_methods_to_save_ == rhs.min_methods_to_save_ &&
-        lhs.min_classes_to_save_ == rhs.min_classes_to_save_ &&
-        lhs.min_notification_before_wake_ == rhs.min_notification_before_wake_ &&
-        lhs.max_notification_before_wake_ == rhs.max_notification_before_wake_;
+           lhs.min_save_period_ms_ == rhs.min_save_period_ms_ &&
+           lhs.min_methods_to_save_ == rhs.min_methods_to_save_ &&
+           lhs.min_classes_to_save_ == rhs.min_classes_to_save_ &&
+           lhs.min_notification_before_wake_ == rhs.min_notification_before_wake_ &&
+           lhs.max_notification_before_wake_ == rhs.max_notification_before_wake_;
   }
 
   bool UsuallyEquals(double expected, double actual) {
@@ -237,6 +235,9 @@ TEST_F(CmdlineParserTest, TestSimpleSuccesses) {
   EXPECT_SINGLE_PARSE_VALUE(false, "-XX:DisableHSpaceCompactForOOM", M::EnableHSpaceCompactForOOM);
   EXPECT_SINGLE_PARSE_VALUE(0.5, "-XX:HeapTargetUtilization=0.5", M::HeapTargetUtilization);
   EXPECT_SINGLE_PARSE_VALUE(5u, "-XX:ParallelGCThreads=5", M::ParallelGCThreads);
+  EXPECT_SINGLE_PARSE_VALUE(10u,
+                            "-XX:ParallelGCThreads=5 -XX:ParallelGCThreads=10",
+                            M::ParallelGCThreads);
 }  // TEST_F
 
 TEST_F(CmdlineParserTest, TestSimpleFailures) {
@@ -487,19 +488,17 @@ TEST_F(CmdlineParserTest, TestJitOptions) {
 * -Xps-*
 */
 TEST_F(CmdlineParserTest, ProfileSaverOptions) {
-  ProfileSaverOptions opt = ProfileSaverOptions(true, 1, 2, 3, 4, 5, 6, 7, 8, 9, "abc", true);
+  ProfileSaverOptions opt = ProfileSaverOptions(true, 1, 2, 3, 4, 5, 6, 7, "abc", true);
 
   EXPECT_SINGLE_PARSE_VALUE(opt,
                             "-Xjitsaveprofilinginfo "
                             "-Xps-min-save-period-ms:1 "
                             "-Xps-min-first-save-ms:2 "
-                            "-Xps-save-resolved-classes-delay-ms:3 "
-                            "-Xps-hot-startup-method-samples:4 "
-                            "-Xps-min-methods-to-save:5 "
-                            "-Xps-min-classes-to-save:6 "
-                            "-Xps-min-notification-before-wake:7 "
-                            "-Xps-max-notification-before-wake:8 "
-                            "-Xps-inline-cache-threshold:9 "
+                            "-Xps-min-methods-to-save:3 "
+                            "-Xps-min-classes-to-save:4 "
+                            "-Xps-min-notification-before-wake:5 "
+                            "-Xps-max-notification-before-wake:6 "
+                            "-Xps-inline-cache-threshold:7 "
                             "-Xps-profile-path:abc "
                             "-Xps-profile-boot-class-path",
                             M::ProfileSaverOpts);

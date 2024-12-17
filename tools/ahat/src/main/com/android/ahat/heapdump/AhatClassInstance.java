@@ -16,7 +16,6 @@
 
 package com.android.ahat.heapdump;
 
-import java.awt.image.BufferedImage;
 import java.util.Iterator;
 import java.util.NoSuchElementException;
 
@@ -30,6 +29,21 @@ import java.util.NoSuchElementException;
  * object in addition to those methods inherited from {@link AhatInstance}.
  */
 public class AhatClassInstance extends AhatInstance {
+
+  /**
+   * Create an AhatClassInstance or AhatBitmapInstance if it's a subclass of
+   * android.graphics.Bitmap
+   *
+   * @param classObj - the class of this object
+   * @param objectId - the object Id
+   * @return an AhatClassInstance or AhatBitmapInstance
+   */
+  public static AhatClassInstance create(AhatClassObj classObj, long objectId) {
+    return classObj.isSubClassOf("android.graphics.Bitmap")
+        ? new AhatBitmapInstance(objectId)
+        : new AhatClassInstance(objectId);
+  }
+
   // Instance fields of the object. These are stored in order of the instance
   // field descriptors from the class object, starting with this class first,
   // followed by the super class, and so on. We store the values separate from
@@ -66,10 +80,13 @@ public class AhatClassInstance extends AhatInstance {
   /**
    * Read an int field of an instance.
    * The field is assumed to be an int type.
-   * Returns <code>def</code> if the field value is not an int or could not be
+   *
+   * @param fieldName name of the int field
+   * @param def default value if the field is not an int or could not be read
+   * @return <code>def</code> if the field value is not an int or could not be
    * read.
    */
-  private Integer getIntField(String fieldName, Integer def) {
+  protected Integer getIntField(String fieldName, Integer def) {
     Value value = getField(fieldName);
     if (value == null || !value.isInteger()) {
       return def;
@@ -80,10 +97,13 @@ public class AhatClassInstance extends AhatInstance {
   /**
    * Read a long field of this instance.
    * The field is assumed to be a long type.
-   * Returns <code>def</code> if the field value is not an long or could not
+   *
+   * @param fieldName name of the long field
+   * @param def default value if the field is not an int or could not be read
+   * @return <code>def</code> if the field value is not an long or could not
    * be read.
    */
-  private Long getLongField(String fieldName, Long def) {
+  protected Long getLongField(String fieldName, Long def) {
     Value value = getField(fieldName);
     if (value == null || !value.isLong()) {
       return def;
@@ -105,6 +125,30 @@ public class AhatClassInstance extends AhatInstance {
   @Override
   Iterable<Reference> getReferences() {
     return new ReferenceIterator();
+  }
+
+  /**
+   * Returns the value of the field of `fieldName` as an AhatArrayInstance
+   *
+   * @param fieldName name of the array field
+   * @return null if the field is not found, or the field is not an
+   * AhatArrayInstance.
+   */
+  protected AhatArrayInstance getArrayField(String fieldName) {
+    AhatInstance field = getRefField(fieldName);
+    return (field == null) ? null : field.asArrayInstance();
+  }
+
+  /**
+   * Reads the given field from the given instance.
+   * The field is assumed to be a byte[] field.
+   *
+   * @param fieldName name of the byte array field
+   * @return null if the field value is null, not a byte[] or could not be read.
+   */
+  protected byte[] getByteArrayField(String fieldName) {
+    AhatInstance field = getRefField(fieldName);
+    return field == null ? null : field.asByteArray();
   }
 
   @Override public String asString(int maxChars) {
@@ -192,7 +236,7 @@ public class AhatClassInstance extends AhatInstance {
   }
 
   @Override public AhatInstance getAssociatedBitmapInstance() {
-    return getBitmapInfo() == null ? null : this;
+    return asBitmapInstance();
   }
 
   @Override public boolean isClassInstance() {
@@ -224,83 +268,6 @@ public class AhatClassInstance extends AhatInstance {
     } else {
       return null;
     }
-  }
-
-  /**
-   * Read the given field from the given instance.
-   * The field is assumed to be a byte[] field.
-   * Returns null if the field value is null, not a byte[] or could not be read.
-   */
-  private byte[] getByteArrayField(String fieldName) {
-    AhatInstance field = getRefField(fieldName);
-    return field == null ? null : field.asByteArray();
-  }
-
-  private static class BitmapInfo {
-    public final int width;
-    public final int height;
-    public final byte[] buffer;
-
-    public BitmapInfo(int width, int height, byte[] buffer) {
-      this.width = width;
-      this.height = height;
-      this.buffer = buffer;
-    }
-  }
-
-  /**
-   * Return bitmap info for this object, or null if no appropriate bitmap
-   * info is available.
-   */
-  private BitmapInfo getBitmapInfo() {
-    if (!isInstanceOfClass("android.graphics.Bitmap")) {
-      return null;
-    }
-
-    Integer width = getIntField("mWidth", null);
-    if (width == null) {
-      return null;
-    }
-
-    Integer height = getIntField("mHeight", null);
-    if (height == null) {
-      return null;
-    }
-
-    byte[] buffer = getByteArrayField("mBuffer");
-    if (buffer == null) {
-      return null;
-    }
-
-    if (buffer.length < 4 * height * width) {
-      return null;
-    }
-
-    return new BitmapInfo(width, height, buffer);
-
-  }
-
-  @Override public BufferedImage asBitmap() {
-    BitmapInfo info = getBitmapInfo();
-    if (info == null) {
-      return null;
-    }
-
-    // Convert the raw data to an image
-    // Convert BGRA to ABGR
-    int[] abgr = new int[info.height * info.width];
-    for (int i = 0; i < abgr.length; i++) {
-      abgr[i] = (
-          (((int) info.buffer[i * 4 + 3] & 0xFF) << 24)
-          + (((int) info.buffer[i * 4 + 0] & 0xFF) << 16)
-          + (((int) info.buffer[i * 4 + 1] & 0xFF) << 8)
-          + ((int) info.buffer[i * 4 + 2] & 0xFF));
-    }
-
-    BufferedImage bitmap = new BufferedImage(
-        info.width, info.height, BufferedImage.TYPE_4BYTE_ABGR);
-    bitmap.setRGB(0, 0, info.width, info.height, abgr, 0, info.width);
-    return bitmap;
   }
 
   @Override
@@ -337,6 +304,14 @@ public class AhatClassInstance extends AhatInstance {
 
     Value referent = getField("referent");
     if (referent == null || !referent.isAhatInstance()) {
+      return null;
+    }
+
+    Value next = getField("next");
+    if (next != null && next.isAhatInstance() && next.asAhatInstance().getId() == getId()) {
+      // sun.misc.Cleaner.next points to this sun.misc.Cleaner instance,
+      // indicating that sun.misc.Cleaner.clean() has already been called and
+      // associated native allocations have been freed.
       return null;
     }
 

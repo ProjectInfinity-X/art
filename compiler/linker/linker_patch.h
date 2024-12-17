@@ -25,6 +25,9 @@
 #include "base/bit_utils.h"
 #include "base/macros.h"
 #include "dex/method_reference.h"
+#include "dex/proto_reference.h"
+#include "dex/string_reference.h"
+#include "dex/type_reference.h"
 
 namespace art HIDDEN {
 
@@ -45,12 +48,13 @@ class LinkerPatch {
   // Note: Actual patching is instruction_set-dependent.
   enum class Type : uint8_t {
     kIntrinsicReference,      // Boot image reference for an intrinsic, see IntrinsicObjects.
-    kDataBimgRelRo,
+    kBootImageRelRo,
     kMethodRelative,
     kMethodBssEntry,
     kJniEntrypointRelative,
     kCallRelative,
     kTypeRelative,
+    kTypeAppImageRelRo,
     kTypeBssEntry,
     kPublicTypeBssEntry,
     kPackageTypeBssEntry,
@@ -70,10 +74,10 @@ class LinkerPatch {
     return patch;
   }
 
-  static LinkerPatch DataBimgRelRoPatch(size_t literal_offset,
-                                        uint32_t pc_insn_offset,
-                                        uint32_t boot_image_offset) {
-    LinkerPatch patch(literal_offset, Type::kDataBimgRelRo, /* target_dex_file= */ nullptr);
+  static LinkerPatch BootImageRelRoPatch(size_t literal_offset,
+                                         uint32_t pc_insn_offset,
+                                         uint32_t boot_image_offset) {
+    LinkerPatch patch(literal_offset, Type::kBootImageRelRo, /* target_dex_file= */ nullptr);
     patch.boot_image_offset_ = boot_image_offset;
     patch.pc_insn_offset_ = pc_insn_offset;
     return patch;
@@ -122,6 +126,16 @@ class LinkerPatch {
                                        uint32_t pc_insn_offset,
                                        uint32_t target_type_idx) {
     LinkerPatch patch(literal_offset, Type::kTypeRelative, target_dex_file);
+    patch.type_idx_ = target_type_idx;
+    patch.pc_insn_offset_ = pc_insn_offset;
+    return patch;
+  }
+
+  static LinkerPatch TypeAppImageRelRoPatch(size_t literal_offset,
+                                            const DexFile* target_dex_file,
+                                            uint32_t pc_insn_offset,
+                                            uint32_t target_type_idx) {
+    LinkerPatch patch(literal_offset, Type::kTypeAppImageRelRo, target_dex_file);
     patch.type_idx_ = target_type_idx;
     patch.pc_insn_offset_ = pc_insn_offset;
     return patch;
@@ -224,7 +238,7 @@ class LinkerPatch {
   }
 
   uint32_t BootImageOffset() const {
-    DCHECK(patch_type_ == Type::kDataBimgRelRo);
+    DCHECK(patch_type_ == Type::kBootImageRelRo);
     return boot_image_offset_;
   }
 
@@ -236,51 +250,34 @@ class LinkerPatch {
     return MethodReference(target_dex_file_, method_idx_);
   }
 
-  const DexFile* TargetTypeDexFile() const {
+  TypeReference TargetType() const {
     DCHECK(patch_type_ == Type::kTypeRelative ||
+           patch_type_ == Type::kTypeAppImageRelRo ||
            patch_type_ == Type::kTypeBssEntry ||
            patch_type_ == Type::kPublicTypeBssEntry ||
            patch_type_ == Type::kPackageTypeBssEntry);
-    return target_dex_file_;
+    return TypeReference(target_dex_file_, dex::TypeIndex(type_idx_));
   }
 
-  dex::TypeIndex TargetTypeIndex() const {
-    DCHECK(patch_type_ == Type::kTypeRelative ||
-           patch_type_ == Type::kTypeBssEntry ||
-           patch_type_ == Type::kPublicTypeBssEntry ||
-           patch_type_ == Type::kPackageTypeBssEntry);
-    return dex::TypeIndex(type_idx_);
-  }
-
-  const DexFile* TargetStringDexFile() const {
+  StringReference TargetString() const {
     DCHECK(patch_type_ == Type::kStringRelative ||
            patch_type_ == Type::kStringBssEntry);
-    return target_dex_file_;
+    return StringReference(target_dex_file_, dex::StringIndex(string_idx_));
   }
 
-  dex::StringIndex TargetStringIndex() const {
-    DCHECK(patch_type_ == Type::kStringRelative ||
-           patch_type_ == Type::kStringBssEntry);
-    return dex::StringIndex(string_idx_);
-  }
-
-  const DexFile* TargetProtoDexFile() const {
+  ProtoReference TargetProto() const {
     DCHECK(patch_type_ == Type::kMethodTypeBssEntry);
-    return target_dex_file_;
-  }
-
-  dex::ProtoIndex TargetProtoIndex() const {
-    DCHECK(patch_type_ == Type::kMethodTypeBssEntry);
-    return dex::ProtoIndex(proto_idx_);
+    return ProtoReference(target_dex_file_, dex::ProtoIndex(proto_idx_));
   }
 
   uint32_t PcInsnOffset() const {
     DCHECK(patch_type_ == Type::kIntrinsicReference ||
-           patch_type_ == Type::kDataBimgRelRo ||
+           patch_type_ == Type::kBootImageRelRo ||
            patch_type_ == Type::kMethodRelative ||
            patch_type_ == Type::kMethodBssEntry ||
            patch_type_ == Type::kJniEntrypointRelative ||
            patch_type_ == Type::kTypeRelative ||
+           patch_type_ == Type::kTypeAppImageRelRo ||
            patch_type_ == Type::kTypeBssEntry ||
            patch_type_ == Type::kPublicTypeBssEntry ||
            patch_type_ == Type::kPackageTypeBssEntry ||
@@ -322,7 +319,7 @@ class LinkerPatch {
   Type patch_type_ : 8;
   union {
     uint32_t cmp1_;               // Used for relational operators.
-    uint32_t boot_image_offset_;  // Data to write to the .data.bimg.rel.ro entry.
+    uint32_t boot_image_offset_;  // Data to write to the boot image .data.img.rel.ro entry.
     uint32_t method_idx_;         // Method index for Call/Method patches.
     uint32_t type_idx_;           // Type index for Type patches.
     uint32_t string_idx_;         // String index for String patches.

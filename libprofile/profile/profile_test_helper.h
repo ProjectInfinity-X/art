@@ -48,8 +48,10 @@ class ProfileTestHelper {
       uint16_t method_idx,
       Hotness::Flag flags,
       const ProfileSampleAnnotation& annotation = ProfileSampleAnnotation::kNone) {
-    return info->AddMethod(
-        ProfileMethodInfo(MethodReference(dex, method_idx)), flags, annotation);
+    return info->AddMethod(ProfileMethodInfo(MethodReference(dex, method_idx)),
+                           flags,
+                           annotation,
+                           /*is_test=*/ true);
   }
 
   static bool AddMethod(
@@ -68,8 +70,10 @@ class ProfileTestHelper {
       const std::vector<ProfileInlineCache>& inline_caches,
       Hotness::Flag flags,
       const ProfileSampleAnnotation& annotation = ProfileSampleAnnotation::kNone) {
-    return info->AddMethod(
-        ProfileMethodInfo(MethodReference(dex, method_idx), inline_caches), flags, annotation);
+    return info->AddMethod(ProfileMethodInfo(MethodReference(dex, method_idx), inline_caches),
+                           flags,
+                           annotation,
+                           /*is_test=*/ true);
   }
 
   static bool AddClass(ProfileCompilationInfo* info,
@@ -134,7 +138,7 @@ class ProfileTestHelper {
                              return type_index == type_ref.TypeIndex();
                            } else {
                              const char* expected_descriptor =
-                                 type_ref.dex_file->StringByTypeIdx(type_ref.TypeIndex());
+                                 type_ref.dex_file->GetTypeDescriptor(type_ref.TypeIndex());
                              const char* descriptor = info.GetTypeDescriptor(dex_file, type_index);
                              return strcmp(expected_descriptor, descriptor) == 0;
                            }

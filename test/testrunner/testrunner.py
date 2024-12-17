@@ -35,7 +35,7 @@ dependencies:
 There are various options to invoke the script which are:
 -t: Either the test name as in art/test or the test name including the variant
     information. Eg, "-t 001-HelloWorld",
-    "-t test-art-host-run-test-debug-prebuild-optimizing-relocate-ntrace-cms-checkjni-picimage-ndebuggable-001-HelloWorld32"
+    "-t test-art-host-run-test-debug-prebuild-optimizing-relocate-ntrace-cms-checkjni-picimage-ndebuggable-no-jvmti-001-HelloWorld32"
 -j: Number of thread workers to be used. Eg - "-j64"
 --dry-run: Instead of running the test name, just print its name.
 --verbose
@@ -203,7 +203,7 @@ def setup_csv_result():
   csv_writer = csv.writer(csv_result)
   # Write the header.
   csv_writer.writerow(['target', 'run', 'prebuild', 'compiler', 'relocate', 'trace', 'gc',
-                       'jni', 'image', 'debuggable', 'jvmti', 'cdex_level', 'test', 'address_size', 'result'])
+                       'jni', 'image', 'debuggable', 'jvmti', 'test', 'address_size', 'result'])
 
 
 def send_csv_result(test, result):
@@ -236,7 +236,6 @@ def gather_test_info():
   VARIANT_TYPE_DICT['debuggable'] = {'ndebuggable', 'debuggable'}
   VARIANT_TYPE_DICT['gc'] = {'gcstress', 'gcverify', 'cms'}
   VARIANT_TYPE_DICT['prebuild'] = {'no-prebuild', 'prebuild'}
-  VARIANT_TYPE_DICT['cdex_level'] = {'cdex-none', 'cdex-fast'}
   VARIANT_TYPE_DICT['relocate'] = {'relocate', 'no-relocate'}
   VARIANT_TYPE_DICT['jni'] = {'jni', 'forcecopy', 'checkjni'}
   VARIANT_TYPE_DICT['address_sizes'] = {'64', '32'}
@@ -270,7 +269,6 @@ def setup_test_env():
   default_variants = {
       'target': {'host', 'target'},
       'prebuild': {'prebuild'},
-      'cdex_level': {'cdex-fast'},
       'jvmti': { 'no-jvmti'},
       'compiler': {'optimizing',
                    'jit',
@@ -447,8 +445,7 @@ def run_tests(tests):
                                  user_input_variants['relocate'], user_input_variants['trace'],
                                  user_input_variants['gc'], user_input_variants['jni'],
                                  user_input_variants['image'],
-                                 user_input_variants['debuggable'], user_input_variants['jvmti'],
-                                 user_input_variants['cdex_level'])
+                                 user_input_variants['debuggable'], user_input_variants['jvmti'])
     return config
 
   # [--host, --target] combines with all the other user input variants.
@@ -460,12 +457,11 @@ def run_tests(tests):
       'relocate': [''], 'trace': [''],
       'gc': [''], 'jni': [''],
       'image': [''],
-      'debuggable': [''], 'jvmti': [''],
-      'cdex_level': ['']})
+      'debuggable': [''], 'jvmti': ['']})
 
   def start_combination(executor, config_tuple, global_options, address_size):
       test, target, run, prebuild, compiler, relocate, trace, gc, \
-      jni, image, debuggable, jvmti, cdex_level = config_tuple
+      jni, image, debuggable, jvmti = config_tuple
 
       # NB The order of components here should match the order of
       # components in the regex parser in parse_test_name.
@@ -481,12 +477,11 @@ def run_tests(tests):
       test_name += image + '-'
       test_name += debuggable + '-'
       test_name += jvmti + '-'
-      test_name += cdex_level + '-'
       test_name += test
       test_name += address_size
 
       variant_set = {target, run, prebuild, compiler, relocate, trace, gc, jni,
-                     image, debuggable, jvmti, cdex_level, address_size}
+                     image, debuggable, jvmti, address_size}
 
       args_test = global_options.copy()
 
@@ -517,10 +512,6 @@ def run_tests(tests):
         args_test += ['--prebuild']
       elif prebuild == 'no-prebuild':
         args_test += ['--no-prebuild']
-
-      if cdex_level:
-        # Add option and remove the cdex- prefix.
-        args_test += ['--compact-dex-level', cdex_level.replace('cdex-','')]
 
       if compiler == 'optimizing':
         args_test += ['--optimizing']
@@ -1000,13 +991,12 @@ def extract_test_name(test_name):
     regex += '(' + '|'.join(VARIANT_TYPE_DICT['image']) + ')-'
     regex += '(' + '|'.join(VARIANT_TYPE_DICT['debuggable']) + ')-'
     regex += '(' + '|'.join(VARIANT_TYPE_DICT['jvmti']) + ')-'
-    regex += '(' + '|'.join(VARIANT_TYPE_DICT['cdex_level']) + ')-'
     regex += '(' + '|'.join(RUN_TEST_SET) + ')'
     regex += '(' + '|'.join(VARIANT_TYPE_DICT['address_sizes']) + ')$'
     test_name_matcher = re.compile(regex)
   match = test_name_matcher.match(test_name)
   if match:
-    return list(match.group(i) for i in range(1,15))
+    return list(match.groups())
   raise ValueError(test_name + " is not a valid test")
 
 def parse_test_name(test_name):
@@ -1014,7 +1004,7 @@ def parse_test_name(test_name):
   It supports two types of test_name:
   1) Like 001-HelloWorld. In this case, it will just verify if the test actually
   exists and if it does, it returns the testname.
-  2) Like test-art-host-run-test-debug-prebuild-interpreter-no-relocate-ntrace-cms-checkjni-pointer-ids-picimage-ndebuggable-001-HelloWorld32
+  2) Like test-art-host-run-test-debug-prebuild-interpreter-no-relocate-ntrace-cms-checkjni-picimage-ndebuggable-no-jvmti-001-HelloWorld32
   In this case, it will parse all the variants and check if they are placed
   correctly. If yes, it will set the various VARIANT_TYPES to use the
   variants required to run the test. Again, it returns the test_name
@@ -1039,9 +1029,8 @@ def parse_test_name(test_name):
   _user_input_variants['image'].add(parsed[8])
   _user_input_variants['debuggable'].add(parsed[9])
   _user_input_variants['jvmti'].add(parsed[10])
-  _user_input_variants['cdex_level'].add(parsed[11])
-  _user_input_variants['address_sizes'].add(parsed[13])
-  return {parsed[12]}
+  _user_input_variants['address_sizes'].add(parsed[12])
+  return {parsed[11]}
 
 
 def get_target_cpu_count():

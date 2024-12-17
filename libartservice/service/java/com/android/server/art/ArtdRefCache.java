@@ -23,6 +23,7 @@ import android.annotation.Nullable;
 import android.os.Build;
 import android.os.IBinder;
 import android.os.RemoteException;
+import android.system.SystemCleaner;
 import android.util.CloseGuard;
 
 import androidx.annotation.RequiresApi;
@@ -30,6 +31,7 @@ import androidx.annotation.RequiresApi;
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.annotations.VisibleForTesting;
 
+import java.lang.ref.Cleaner;
 import java.lang.ref.Reference;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -42,12 +44,14 @@ import java.util.concurrent.ScheduledExecutorService;
  */
 @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
 public class ArtdRefCache {
-    private static final String TAG = ArtManagerLocal.TAG;
     // The 15s timeout is arbitrarily picked.
     // TODO(jiakaiz): Revisit this based on real CUJs.
     @VisibleForTesting public static final long CACHE_TIMEOUT_MS = 15_000;
 
-    @Nullable private static ArtdRefCache sInstance = null;
+    // The static field is associated with the class and the class loader that loads it. In the
+    // Pre-reboot Dexopt case, this class is loaded by a separate class loader, so it doesn't share
+    // the same static field with the class outside of the class loader.
+    @GuardedBy("ArtdRefCache.class") @Nullable private static ArtdRefCache sInstance = null;
 
     @NonNull private final Injector mInjector;
     @NonNull private final Debouncer mDebouncer;
@@ -108,6 +112,22 @@ public class ArtdRefCache {
         }
     }
 
+    /**
+     * Resets ArtdRefCache to its initial state. ArtdRefCache is guaranteed to be GC-able after
+     * this call.
+     *
+     * Can only be called when there is no pin.
+     */
+    public void reset() {
+        synchronized (mLock) {
+            if (mPinCount != 0) {
+                throw new IllegalStateException("Cannot reset ArtdRefCache when there are pins");
+            }
+            mArtd = null;
+            mDebouncer.cancel();
+        }
+    }
+
     @GuardedBy("mLock")
     private void delayedDropIfNoPinLocked() {
         if (mPinCount == 0) {
@@ -134,41 +154,48 @@ public class ArtdRefCache {
      * scope. The reference is dropped when there is no more pin within {@link #CACHE_TIMEOUT_MS}.
      */
     public class Pin implements AutoCloseable {
-        private final CloseGuard mGuard = new CloseGuard();
-        private boolean mClosed = false;
+        @NonNull private final CloseGuard mGuard = new CloseGuard();
+        @NonNull private final Cleaner.Cleanable mCleanable;
 
         public Pin() {
             synchronized (mLock) {
                 mPinCount++;
             }
             mGuard.open("close");
+            mCleanable =
+                    SystemCleaner.cleaner().register(this, new Cleanup(ArtdRefCache.this, mGuard));
         }
 
         @Override
         public void close() {
             try {
                 mGuard.close();
-                if (!mClosed) {
-                    mClosed = true;
-                    synchronized (mLock) {
-                        mPinCount--;
-                        Utils.check(mPinCount >= 0);
-                        delayedDropIfNoPinLocked();
-                    }
-                }
+                mCleanable.clean();
             } finally {
-                // This prevents the GC from running the finalizer during the execution of `close`.
+                // This prevents the cleaner from running the cleanup during the execution of
+                // `close`.
                 Reference.reachabilityFence(this);
             }
         }
 
-        @SuppressWarnings("Finalize") // Follows the recommended pattern for CloseGuard.
-        protected void finalize() throws Throwable {
-            try {
+        // Don't use a lambda. See {@link Cleaner} for the reason.
+        static class Cleanup implements Runnable {
+            @NonNull private final ArtdRefCache mRefCache;
+            @NonNull private final CloseGuard mGuard;
+
+            Cleanup(@NonNull ArtdRefCache refCache, @NonNull CloseGuard guard) {
+                mRefCache = refCache;
+                mGuard = guard;
+            }
+
+            @Override
+            public void run() {
                 mGuard.warnIfOpen();
-                close();
-            } finally {
-                super.finalize();
+                synchronized (mRefCache.mLock) {
+                    mRefCache.mPinCount--;
+                    Utils.check(mRefCache.mPinCount >= 0);
+                    mRefCache.delayedDropIfNoPinLocked();
+                }
             }
         }
     }
@@ -194,19 +221,12 @@ public class ArtdRefCache {
     public static class Injector {
         Injector() {
             // Call the getters for various dependencies, to ensure correct initialization order.
-            ArtModuleServiceInitializer.getArtModuleServiceManager();
+            GlobalInjector.getInstance().checkArtModuleServiceManager();
         }
 
         @NonNull
         public IArtd getArtd() {
-            IArtd artd =
-                    IArtd.Stub.asInterface(ArtModuleServiceInitializer.getArtModuleServiceManager()
-                                                   .getArtdServiceRegisterer()
-                                                   .waitForService());
-            if (artd == null) {
-                throw new IllegalStateException("Unable to connect to artd");
-            }
-            return artd;
+            return GlobalInjector.getInstance().getArtd();
         }
 
         @NonNull

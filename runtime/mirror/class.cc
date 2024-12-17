@@ -25,8 +25,8 @@
 #include "array-inl.h"
 #include "art_field-inl.h"
 #include "art_method-inl.h"
-#include "base/enums.h"
 #include "base/logging.h"  // For VLOG.
+#include "base/pointer_size.h"
 #include "base/sdk_version.h"
 #include "base/utils.h"
 #include "class-inl.h"
@@ -451,15 +451,28 @@ void Class::DumpClass(std::ostream& os, int flags) {
 }
 
 void Class::SetReferenceInstanceOffsets(uint32_t new_reference_offsets) {
-  if (kIsDebugBuild && new_reference_offsets != kClassWalkSuper) {
+  if (kIsDebugBuild) {
     // Check that the number of bits set in the reference offset bitmap
     // agrees with the number of references.
     uint32_t count = 0;
     for (ObjPtr<Class> c = this; c != nullptr; c = c->GetSuperClass()) {
       count += c->NumReferenceInstanceFieldsDuringLinking();
     }
+    uint32_t pop_cnt;
+    if ((new_reference_offsets & kVisitReferencesSlowpathMask) == 0) {
+      pop_cnt = static_cast<uint32_t>(POPCOUNT(new_reference_offsets));
+    } else {
+      uint32_t bitmap_num_words = new_reference_offsets & ~kVisitReferencesSlowpathMask;
+      uint32_t* overflow_bitmap =
+          reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(this) +
+                                      (GetClassSize() - bitmap_num_words * sizeof(uint32_t)));
+      pop_cnt = 0;
+      for (uint32_t i = 0; i < bitmap_num_words; i++) {
+        pop_cnt += static_cast<uint32_t>(POPCOUNT(overflow_bitmap[i]));
+      }
+    }
     // +1 for the Class in Object.
-    CHECK_EQ(static_cast<uint32_t>(POPCOUNT(new_reference_offsets)) + 1, count);
+    CHECK_EQ(pop_cnt + 1, count);
   }
   // Not called within a transaction.
   SetField32<false>(OFFSET_OF_OBJECT_MEMBER(Class, reference_instance_offsets_),
@@ -573,7 +586,7 @@ ArtMethod* Class::FindInterfaceMethod(ObjPtr<DexCache> dex_cache,
   // We always search by name and signature, ignoring the type index in the MethodId.
   const DexFile& dex_file = *dex_cache->GetDexFile();
   const dex::MethodId& method_id = dex_file.GetMethodId(dex_method_idx);
-  std::string_view name = dex_file.StringViewByIdx(method_id.name_idx_);
+  std::string_view name = dex_file.GetStringView(method_id.name_idx_);
   const Signature signature = dex_file.GetMethodSignature(method_id);
   return FindInterfaceMethod(name, signature, pointer_size);
 }
@@ -793,7 +806,7 @@ static std::tuple<bool, ArtMethod*> FindDeclaredClassMethod(ObjPtr<mirror::Class
     // Do not use ArtMethod::GetNameView() to avoid reloading dex file through the same
     // declaring class from different methods and also avoid the runtime method check.
     const dex::MethodId& method_id = get_method_id(mid);
-    return name.compare(dex_file.GetMethodNameView(method_id));
+    return DexFile::CompareMemberNames(name, dex_file.GetMethodNameView(method_id));
   };
   auto signature_cmp = [&](uint32_t mid) REQUIRES_SHARED(Locks::mutator_lock_) ALWAYS_INLINE {
     // Do not use ArtMethod::GetSignature() to avoid reloading dex file through the same
@@ -913,7 +926,7 @@ ArtMethod* Class::FindClassMethod(ObjPtr<DexCache> dex_cache,
   for (klass = this; klass != end_klass; klass = klass->GetSuperClass()) {
     ArraySlice<ArtMethod> copied_methods = klass->GetCopiedMethodsSlice(pointer_size);
     if (!copied_methods.empty() && name.empty()) {
-      name = dex_file.StringDataByIdx(method_id.name_idx_);
+      name = dex_file.GetMethodNameView(method_id);
     }
     for (ArtMethod& method : copied_methods) {
       if (method.GetNameView() == name && method.GetSignature() == signature) {
@@ -1043,9 +1056,9 @@ static std::tuple<bool, ArtField*> FindFieldByNameAndType(const DexFile& dex_fil
 
   // Fields are sorted by class, then name, then type descriptor. This is verified in dex file
   // verifier. There can be multiple fields with the same name in the same class due to proguard.
-  // Note: std::string_view::compare() uses lexicographical comparison and treats the `char` as
-  // unsigned; for Modified-UTF-8 without embedded nulls this is consistent with the
-  // CompareModifiedUtf8ToModifiedUtf8AsUtf16CodePointValues() ordering.
+  // Note: `std::string_view::compare()` uses lexicographical comparison and treats the `char`
+  // as unsigned; for Modified-UTF-8 without embedded nulls this is consistent with the
+  // `CompareModifiedUtf8ToModifiedUtf8AsUtf16CodePointValues()` ordering.
   auto get_field_id = [&](uint32_t mid) REQUIRES_SHARED(Locks::mutator_lock_) ALWAYS_INLINE
       -> const dex::FieldId& {
     ArtField& field = fields->At(mid);
@@ -1054,11 +1067,12 @@ static std::tuple<bool, ArtField*> FindFieldByNameAndType(const DexFile& dex_fil
   };
   auto name_cmp = [&](uint32_t mid) REQUIRES_SHARED(Locks::mutator_lock_) ALWAYS_INLINE {
     const dex::FieldId& field_id = get_field_id(mid);
-    return name.compare(dex_file.GetFieldNameView(field_id));
+    return DexFile::CompareMemberNames(name, dex_file.GetFieldNameView(field_id));
   };
   auto type_cmp = [&](uint32_t mid) REQUIRES_SHARED(Locks::mutator_lock_) ALWAYS_INLINE {
     const dex::FieldId& field_id = get_field_id(mid);
-    return type.compare(dex_file.GetTypeDescriptorView(dex_file.GetTypeId(field_id.type_idx_)));
+    return DexFile::CompareDescriptors(
+        type, dex_file.GetTypeDescriptorView(dex_file.GetTypeId(field_id.type_idx_)));
   };
   auto get_name_idx = [&](uint32_t mid) REQUIRES_SHARED(Locks::mutator_lock_) ALWAYS_INLINE {
     const dex::FieldId& field_id = get_field_id(mid);
@@ -1460,7 +1474,10 @@ void Class::ClearDontCompileFlagOnAllMethods(PointerSize pointer_size) {
 void Class::SetSkipAccessChecksFlagOnAllMethods(PointerSize pointer_size) {
   DCHECK(IsVerified());
   for (auto& m : GetMethods(pointer_size)) {
-    if (m.IsManagedAndInvokable()) {
+    // Copied methods that have code come from default interface methods. The
+    // flag should be set on these copied methods at the point of copy, which is
+    // after the interface has been verified.
+    if (m.IsManagedAndInvokable() && !m.IsCopied()) {
       m.SetSkipAccessChecks();
     }
   }
@@ -1603,6 +1620,114 @@ void Class::PopulateEmbeddedVTable(PointerSize pointer_size) {
   }
 }
 
+// Set the bitmap of reference instance field offsets.
+void Class::PopulateReferenceOffsetBitmap() {
+  size_t num_reference_fields;
+  ObjPtr<mirror::Class> super_class;
+  ObjPtr<Class> klass;
+  // Find the first class with non-zero instance reference fields.
+  for (klass = this; klass != nullptr; klass = super_class) {
+    super_class = klass->GetSuperClass();
+    num_reference_fields = klass->NumReferenceInstanceFieldsDuringLinking();
+    if (num_reference_fields != 0) {
+      break;
+    }
+  }
+
+  uint32_t ref_offsets = 0;
+  // Leave the reference offsets as 0 for mirror::Object (the class field is handled specially).
+  if (super_class != nullptr) {
+    // All of the reference fields added by this class are guaranteed to be grouped in memory
+    // starting at an appropriately aligned address after super class object data.
+    uint32_t start_offset =
+        RoundUp(super_class->GetObjectSize(), sizeof(mirror::HeapReference<mirror::Object>));
+    uint32_t start_bit =
+        (start_offset - mirror::kObjectHeaderSize) / sizeof(mirror::HeapReference<mirror::Object>);
+    uint32_t end_bit = start_bit + num_reference_fields;
+    bool overflowing = end_bit > 31;
+    uint32_t* overflow_bitmap;  // Pointer to the last word of overflow bitmap to be written into.
+    uint32_t overflow_words_to_write;  // Number of overflow bitmap words remaining to write.
+    // Index in 'overflow_bitmap' from where to start writing bitmap words (in reverse order).
+    int32_t overflow_bitmap_word_idx;
+    if (overflowing) {
+      // We will write overflow bitmap in reverse.
+      overflow_bitmap =
+          reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(this) + GetClassSize());
+      DCHECK_ALIGNED(overflow_bitmap, sizeof(uint32_t));
+      overflow_bitmap_word_idx = 0;
+      overflow_words_to_write = RoundUp(end_bit, 32) / 32;
+    }
+    // TODO: Simplify by copying the bitmap from the super-class and then
+    // appending the reference fields added by this class.
+    while (true) {
+      if (UNLIKELY(overflowing)) {
+        // Write all the bitmap words which got skipped between previous
+        // super-class and the current one.
+        for (uint32_t new_words_to_write = RoundUp(end_bit, 32) / 32;
+             overflow_words_to_write > new_words_to_write;
+             overflow_words_to_write--) {
+          overflow_bitmap[--overflow_bitmap_word_idx] = ref_offsets;
+          ref_offsets = 0;
+        }
+        // Handle the references in the current super-class.
+        if (num_reference_fields != 0u) {
+          uint32_t aligned_end_bit = RoundDown(end_bit, 32);
+          uint32_t aligned_start_bit = RoundUp(start_bit, 32);
+          // Handle the case where a class' references are spanning across multiple 32-bit
+          // words of the overflow bitmap.
+          if (aligned_end_bit >= aligned_start_bit) {
+            // handle the unaligned end first
+            if (aligned_end_bit < end_bit) {
+              ref_offsets |= 0xffffffffu >> (32 - (end_bit - aligned_end_bit));
+              overflow_bitmap[--overflow_bitmap_word_idx] = ref_offsets;
+              overflow_words_to_write--;
+              ref_offsets = 0;
+            }
+            // store all the 32-bit bitmap words in between
+            for (; aligned_end_bit > aligned_start_bit; aligned_end_bit -= 32) {
+              overflow_bitmap[--overflow_bitmap_word_idx] = 0xffffffffu;
+              overflow_words_to_write--;
+            }
+            CHECK_EQ(ref_offsets, 0u);
+            // handle the unaligned start now
+            if (aligned_start_bit > start_bit) {
+              ref_offsets = 0xffffffffu << (32 - (aligned_start_bit - start_bit));
+            }
+          } else {
+            DCHECK_EQ(aligned_start_bit - aligned_end_bit, 32u);
+            ref_offsets |= (0xffffffffu << (32 - (aligned_start_bit - start_bit))) &
+                           (0xffffffffu >> (32 - (end_bit - aligned_end_bit)));
+          }
+        }
+      } else if (num_reference_fields != 0u) {
+        ref_offsets |= (0xffffffffu << start_bit) & (0xffffffffu >> (32 - end_bit));
+      }
+
+      klass = super_class;
+      super_class = klass->GetSuperClass();
+      if (super_class == nullptr) {
+        break;
+      }
+      num_reference_fields = klass->NumReferenceInstanceFieldsDuringLinking();
+      start_offset =
+          RoundUp(super_class->GetObjectSize(), sizeof(mirror::HeapReference<mirror::Object>));
+      start_bit = (start_offset - mirror::kObjectHeaderSize) /
+                  sizeof(mirror::HeapReference<mirror::Object>);
+      end_bit = start_bit + num_reference_fields;
+    }
+    if (overflowing) {
+      // We should not have more than one word left to write in the overflow bitmap.
+      DCHECK_LE(overflow_words_to_write, 1u)
+          << "overflow_bitmap_word_idx:" << -overflow_bitmap_word_idx;
+      if (overflow_words_to_write > 0) {
+        overflow_bitmap[--overflow_bitmap_word_idx] = ref_offsets;
+      }
+      ref_offsets = -overflow_bitmap_word_idx | kVisitReferencesSlowpathMask;
+    }
+  }
+  SetReferenceInstanceOffsets(ref_offsets);
+}
+
 class ReadBarrierOnNativeRootsVisitor {
  public:
   void operator()([[maybe_unused]] ObjPtr<Object> obj,
@@ -1653,6 +1778,7 @@ class CopyClassVisitor {
     h_new_class_obj->PopulateEmbeddedVTable(pointer_size_);
     h_new_class_obj->SetImt(imt_, pointer_size_);
     h_new_class_obj->SetClassSize(new_length_);
+    h_new_class_obj->PopulateReferenceOffsetBitmap();
     // Visit all of the references to make sure there is no from space references in the native
     // roots.
     h_new_class_obj->Object::VisitReferences(ReadBarrierOnNativeRootsVisitor(), VoidFunctor());
@@ -1689,6 +1815,68 @@ ObjPtr<Class> Class::CopyOf(Handle<Class> h_this,
     return nullptr;
   }
   return new_class->AsClass();
+}
+
+bool Class::DescriptorEquals(ObjPtr<mirror::Class> match) {
+  DCHECK(match != nullptr);
+  ObjPtr<mirror::Class> klass = this;
+  while (klass->IsArrayClass()) {
+    // No read barrier needed, we're reading a chain of constant references for comparison
+    // with null. Then we follow up below with reading constant references to read constant
+    // primitive data in both proxy and non-proxy paths. See ReadBarrierOption.
+    klass = klass->GetComponentType<kDefaultVerifyFlags, kWithoutReadBarrier>();
+    DCHECK(klass != nullptr);
+    match = match->GetComponentType<kDefaultVerifyFlags, kWithoutReadBarrier>();
+    if (match == nullptr){
+      return false;
+    }
+  }
+  if (match->IsArrayClass()) {
+    return false;
+  }
+
+  if (UNLIKELY(klass->IsPrimitive()) || UNLIKELY(match->IsPrimitive())) {
+    return klass->GetPrimitiveType() == match->GetPrimitiveType();
+  }
+
+  if (UNLIKELY(klass->IsProxyClass())) {
+    return klass->ProxyDescriptorEquals(match);
+  }
+  if (UNLIKELY(match->IsProxyClass())) {
+    return match->ProxyDescriptorEquals(klass);
+  }
+
+  const DexFile& klass_dex_file = klass->GetDexFile();
+  const DexFile& match_dex_file = match->GetDexFile();
+  dex::TypeIndex klass_type_index = klass->GetDexTypeIndex();
+  dex::TypeIndex match_type_index = match->GetDexTypeIndex();
+  if (&klass_dex_file == &match_dex_file) {
+    return klass_type_index == match_type_index;
+  }
+  std::string_view klass_descriptor = klass_dex_file.GetTypeDescriptorView(klass_type_index);
+  std::string_view match_descriptor = match_dex_file.GetTypeDescriptorView(match_type_index);
+  return klass_descriptor == match_descriptor;
+}
+
+bool Class::ProxyDescriptorEquals(ObjPtr<mirror::Class> match) {
+  DCHECK(IsProxyClass());
+  ObjPtr<mirror::String> name = GetName<kVerifyNone, kWithoutReadBarrier>();
+  DCHECK(name != nullptr);
+
+  DCHECK(match != nullptr);
+  DCHECK(!match->IsArrayClass());
+  DCHECK(!match->IsPrimitive());
+  if (match->IsProxyClass()) {
+    ObjPtr<mirror::String> match_name = match->GetName<kVerifyNone, kWithoutReadBarrier>();
+    DCHECK(name != nullptr);
+    return name->Equals(match_name);
+  }
+
+  // Note: Proxy descriptor should never match a non-proxy descriptor but ART does not enforce that.
+  std::string descriptor = DotToDescriptor(name->ToModifiedUtf8().c_str());
+  std::string_view match_descriptor =
+      match->GetDexFile().GetTypeDescriptorView(match->GetDexTypeIndex());
+  return descriptor == match_descriptor;
 }
 
 bool Class::ProxyDescriptorEquals(const char* match) {
@@ -1754,8 +1942,15 @@ uint32_t Class::Depth() {
 }
 
 dex::TypeIndex Class::FindTypeIndexInOtherDexFile(const DexFile& dex_file) {
-  std::string temp;
-  const dex::TypeId* type_id = dex_file.FindTypeId(GetDescriptor(&temp));
+  std::string_view descriptor;
+  std::optional<std::string> temp;
+  if (IsPrimitive() || IsArrayClass() || IsProxyClass()) {
+    temp.emplace();
+    descriptor = GetDescriptor(&temp.value());
+  } else {
+    descriptor = GetDescriptorView();
+  }
+  const dex::TypeId* type_id = dex_file.FindTypeId(descriptor);
   return (type_id == nullptr) ? dex::TypeIndex() : dex_file.GetIndexForTypeId(*type_id);
 }
 

@@ -14,10 +14,10 @@
  * limitations under the License.
  */
 
+#include <math.h>
+
 #include <memory>
 #include <type_traits>
-
-#include <math.h>
 
 #include "art_method-inl.h"
 #include "base/bit_utils.h"
@@ -40,7 +40,7 @@
 #include "mirror/object-inl.h"
 #include "mirror/object_array-inl.h"
 #include "mirror/stack_trace_element-inl.h"
-#include "nativehelper/ScopedLocalRef.h"
+#include "nativehelper/scoped_local_ref.h"
 #include "nativeloader/native_loader.h"
 #include "oat/oat_quick_method_header.h"
 #include "runtime.h"
@@ -1374,7 +1374,8 @@ jint Java_MyClassNatives_nativeUpCall(JNIEnv* env, jobject thisObj, jint i) {
     ScopedObjectAccess soa(env);
 
     // Build stack trace
-    jobject internal = Thread::Current()->CreateInternalStackTrace(soa);
+    jobject internal =
+        soa.AddLocalReference<jobject>(Thread::Current()->CreateInternalStackTrace(soa));
     jobjectArray ste_array = Thread::InternalStackTraceToStackTraceElementArray(soa, internal);
     ObjPtr<mirror::ObjectArray<mirror::StackTraceElement>> trace_array =
         soa.Decode<mirror::ObjectArray<mirror::StackTraceElement>>(ste_array);

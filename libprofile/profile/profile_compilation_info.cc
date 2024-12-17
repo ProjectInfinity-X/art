@@ -57,8 +57,10 @@
 #include "base/unix_file/fd_file.h"
 #include "base/utils.h"
 #include "base/zip_archive.h"
+#include "dex/code_item_accessors-inl.h"
 #include "dex/descriptors_names.h"
 #include "dex/dex_file_loader.h"
+#include "dex/dex_instruction-inl.h"
 
 #ifdef ART_TARGET_ANDROID
 #include "android-modules-utils/sdk_level.h"
@@ -118,8 +120,8 @@ static_assert(ProfileCompilationInfo::kIndividualInlineCacheSize < kIsMegamorphi
 static_assert(ProfileCompilationInfo::kIndividualInlineCacheSize < kIsMissingTypesEncoding,
               "InlineCache::kIndividualInlineCacheSize is larger than expected");
 
-static constexpr uint32_t kSizeWarningThresholdBytes = 500000U;
-static constexpr uint32_t kSizeErrorThresholdBytes = 1500000U;
+static constexpr uint32_t kSizeWarningThresholdBytes = 5000000U;
+static constexpr uint32_t kSizeErrorThresholdBytes = 15000000U;
 
 static constexpr uint32_t kSizeWarningThresholdBootBytes = 25000000U;
 static constexpr uint32_t kSizeErrorThresholdBootBytes = 100000000U;
@@ -676,9 +678,10 @@ ProfileCompilationInfo::ProfileSampleAnnotation ProfileCompilationInfo::GetAnnot
 
 bool ProfileCompilationInfo::AddMethods(const std::vector<ProfileMethodInfo>& methods,
                                         MethodHotness::Flag flags,
-                                        const ProfileSampleAnnotation& annotation) {
+                                        const ProfileSampleAnnotation& annotation,
+                                        bool is_test) {
   for (const ProfileMethodInfo& method : methods) {
-    if (!AddMethod(method, flags, annotation)) {
+    if (!AddMethod(method, flags, annotation, is_test)) {
       return false;
     }
   }
@@ -694,12 +697,12 @@ dex::TypeIndex ProfileCompilationInfo::FindOrCreateTypeIndex(const DexFile& dex_
     return class_ref.TypeIndex();
   }
   // Try to find a `TypeId` in the method's dex file.
-  const char* descriptor = class_ref.dex_file->StringByTypeIdx(class_ref.TypeIndex());
+  std::string_view descriptor = class_ref.dex_file->GetTypeDescriptorView(class_ref.TypeIndex());
   return FindOrCreateTypeIndex(dex_file, descriptor);
 }
 
 dex::TypeIndex ProfileCompilationInfo::FindOrCreateTypeIndex(const DexFile& dex_file,
-                                                             const char* descriptor) {
+                                                             std::string_view descriptor) {
   const dex::TypeId* type_id = dex_file.FindTypeId(descriptor);
   if (type_id != nullptr) {
     return dex_file.GetIndexForTypeId(*type_id);
@@ -707,12 +710,11 @@ dex::TypeIndex ProfileCompilationInfo::FindOrCreateTypeIndex(const DexFile& dex_
   // Try to find an existing extra descriptor.
   uint32_t num_type_ids = dex_file.NumTypeIds();
   uint32_t max_artificial_ids = DexFile::kDexNoIndex16 - num_type_ids;
-  std::string_view descriptor_view(descriptor);
   // Check descriptor length for "extra descriptor". We are using `uint16_t` as prefix.
-  if (UNLIKELY(descriptor_view.size() > kMaxExtraDescriptorLength)) {
+  if (UNLIKELY(descriptor.size() > kMaxExtraDescriptorLength)) {
     return dex::TypeIndex();  // Invalid.
   }
-  auto it = extra_descriptors_indexes_.find(descriptor_view);
+  auto it = extra_descriptors_indexes_.find(descriptor);
   if (it != extra_descriptors_indexes_.end()) {
     return (*it < max_artificial_ids) ? dex::TypeIndex(num_type_ids + *it) : dex::TypeIndex();
   }
@@ -721,13 +723,13 @@ dex::TypeIndex ProfileCompilationInfo::FindOrCreateTypeIndex(const DexFile& dex_
     return dex::TypeIndex();  // Invalid.
   }
   // Add the descriptor to extra descriptors and return the artificial type index.
-  ExtraDescriptorIndex new_extra_descriptor_index = AddExtraDescriptor(descriptor_view);
+  ExtraDescriptorIndex new_extra_descriptor_index = AddExtraDescriptor(descriptor);
   DCHECK_LT(new_extra_descriptor_index, max_artificial_ids);
   return dex::TypeIndex(num_type_ids + new_extra_descriptor_index);
 }
 
 bool ProfileCompilationInfo::AddClass(const DexFile& dex_file,
-                                      const char* descriptor,
+                                      std::string_view descriptor,
                                       const ProfileSampleAnnotation& annotation) {
   DexFileData* const data = GetOrAddDexFileData(&dex_file, annotation);
   if (data == nullptr) {  // checksum mismatch
@@ -1316,7 +1318,8 @@ ProfileCompilationInfo::ExtraDescriptorIndex ProfileCompilationInfo::AddExtraDes
 
 bool ProfileCompilationInfo::AddMethod(const ProfileMethodInfo& pmi,
                                        MethodHotness::Flag flags,
-                                       const ProfileSampleAnnotation& annotation) {
+                                       const ProfileSampleAnnotation& annotation,
+                                       bool is_test) {
   DexFileData* const data = GetOrAddDexFileData(pmi.ref.dex_file, annotation);
   if (data == nullptr) {  // checksum mismatch
     return false;
@@ -1333,7 +1336,37 @@ bool ProfileCompilationInfo::AddMethod(const ProfileMethodInfo& pmi,
   InlineCacheMap* inline_cache = data->FindOrAddHotMethod(pmi.ref.index);
   DCHECK(inline_cache != nullptr);
 
+  const dex::MethodId& mid = pmi.ref.GetMethodId();
+  const DexFile& dex_file = *pmi.ref.dex_file;
+  const dex::ClassDef* class_def = dex_file.FindClassDef(mid.class_idx_);
+  // If `is_test` is true, we don't try to look at whether dex_pc fit in the
+  // code item of that method.
+  uint32_t dex_pc_max = 0u;
+  if (is_test) {
+    dex_pc_max = std::numeric_limits<uint32_t>::max();
+  } else {
+    if (class_def == nullptr || dex_file.GetClassData(*class_def) == nullptr) {
+      return true;
+    }
+    std::optional<uint32_t> offset = dex_file.GetCodeItemOffset(*class_def, pmi.ref.index);
+    if (!offset.has_value()) {
+      return true;
+    }
+    CodeItemInstructionAccessor accessor(dex_file, dex_file.GetCodeItem(offset.value()));
+    dex_pc_max = accessor.InsnsSizeInCodeUnits();
+  }
+
   for (const ProfileMethodInfo::ProfileInlineCache& cache : pmi.inline_caches) {
+    if (cache.dex_pc >= std::numeric_limits<uint16_t>::max()) {
+      // Discard entries that don't fit the encoding. This should only apply to
+      // inlined inline caches. See also `HInliner::GetInlineCacheAOT`.
+      continue;
+    }
+    if (cache.dex_pc >= dex_pc_max) {
+      // Discard entries for inlined inline caches. We don't support them in
+      // profiles yet.
+      continue;
+    }
     if (cache.is_missing_types) {
       FindOrAddDexPc(inline_cache, cache.dex_pc)->SetIsMissingTypes();
       continue;
@@ -2998,9 +3031,49 @@ FlattenProfileData::ItemMetadata::ItemMetadata() :
     flags_(0) {
 }
 
-FlattenProfileData::ItemMetadata::ItemMetadata(const ItemMetadata& other) :
-    flags_(other.flags_),
-    annotations_(other.annotations_) {
+void FlattenProfileData::ItemMetadata::ExtractInlineCacheInfo(
+    const ProfileCompilationInfo& profile_info,
+    const DexFile* dex_file,
+    uint16_t dex_method_idx) {
+  ProfileCompilationInfo::MethodHotness hotness =
+      profile_info.GetMethodHotness(MethodReference(dex_file, dex_method_idx));
+  DCHECK(!hotness.IsHot() || hotness.GetInlineCacheMap() != nullptr);
+  if (!hotness.IsHot() || hotness.GetInlineCacheMap()->empty()) {
+    return;
+  }
+  const dex::MethodId& id = dex_file->GetMethodId(dex_method_idx);
+  const ProfileCompilationInfo::InlineCacheMap* inline_caches = hotness.GetInlineCacheMap();
+  const dex::ClassDef* class_def = dex_file->FindClassDef(id.class_idx_);
+  if (class_def == nullptr) {
+    // No class def found.
+    return;
+  }
+
+  CodeItemInstructionAccessor accessor(
+      *dex_file, dex_file->GetCodeItem(dex_file->FindCodeItemOffset(*class_def, dex_method_idx)));
+  for (const auto& [pc, ic_data] : *inline_caches) {
+    if (pc >= accessor.InsnsSizeInCodeUnits()) {
+      // Inlined inline caches are not supported in AOT, so discard any pc beyond the
+      // code item size. See also `HInliner::GetInlineCacheAOT`.
+      continue;
+    }
+    const Instruction& inst = accessor.InstructionAt(pc);
+    const dex::MethodId& target = dex_file->GetMethodId(inst.VRegB());
+    if (ic_data.classes.empty() && !ic_data.is_megamorphic && !ic_data.is_missing_types) {
+      continue;
+    }
+    InlineCacheInfo& val =
+        inline_cache_.FindOrAdd(TypeReference(dex_file, target.class_idx_))->second;
+    if (ic_data.is_megamorphic) {
+      val.is_megamorphic_ = true;
+    }
+    if (ic_data.is_missing_types) {
+      val.is_missing_types_ = true;
+    }
+    for (dex::TypeIndex type_index : ic_data.classes) {
+      val.classes_.insert(profile_info.GetTypeDescriptor(dex_file, type_index));
+    }
+  }
 }
 
 std::unique_ptr<FlattenProfileData> ProfileCompilationInfo::ExtractProfileData(
@@ -3035,6 +3108,8 @@ std::unique_ptr<FlattenProfileData> ProfileCompilationInfo::ExtractProfileData(
             result->method_metadata_.GetOrCreate(ref, create_metadata_fn);
         metadata.flags_ |= hotness.flags_;
         metadata.annotations_.push_back(annotation);
+        metadata.ExtractInlineCacheInfo(*this, dex_file.get(), method_idx);
+
         // Update the max aggregation counter for methods.
         // This is essentially a cache, to avoid traversing all the methods just to find out
         // this value.
@@ -3066,6 +3141,26 @@ std::unique_ptr<FlattenProfileData> ProfileCompilationInfo::ExtractProfileData(
   return result;
 }
 
+void FlattenProfileData::ItemMetadata::MergeInlineCacheInfo(
+    const SafeMap<TypeReference, InlineCacheInfo, TypeReferenceValueComparator>& other) {
+  for (const auto& [target, inline_cache_data] : other) {
+    if (!inline_cache_data.is_megamorphic_ && !inline_cache_data.is_missing_types_ &&
+        inline_cache_data.classes_.empty()) {
+      continue;
+    }
+    InlineCacheInfo& val = inline_cache_.FindOrAdd(target)->second;
+    if (inline_cache_data.is_megamorphic_) {
+      val.is_megamorphic_ = true;
+    }
+    if (inline_cache_data.is_missing_types_) {
+      val.is_missing_types_ = true;
+    }
+    for (const std::string& cls : inline_cache_data.classes_) {
+      val.classes_.insert(cls);
+    }
+  }
+}
+
 void FlattenProfileData::MergeData(const FlattenProfileData& other) {
   auto create_metadata_fn = []() { return FlattenProfileData::ItemMetadata(); };
   for (const auto& it : other.method_metadata_) {
@@ -3079,6 +3174,7 @@ void FlattenProfileData::MergeData(const FlattenProfileData& other) {
     metadata.flags_ |= otherData.GetFlags();
     metadata.annotations_.insert(
         metadata.annotations_.end(), other_annotations.begin(), other_annotations.end());
+    metadata.MergeInlineCacheInfo(otherData.GetInlineCache());
 
     max_aggregation_for_methods_ = std::max(
           max_aggregation_for_methods_,

@@ -19,6 +19,7 @@ import java.lang.ref.ReferenceQueue;
 import java.lang.ref.SoftReference;
 import java.lang.ref.WeakReference;
 import libcore.util.NativeAllocationRegistry;
+import android.graphics.Bitmap;
 
 // We take a heap dump that includes a single instance of this
 // DumpedStuff class. Objects stored as fields in this class can be easily
@@ -50,10 +51,15 @@ public class DumpedStuff extends SuperDumpedStuff {
       bigArray[i] = (byte)((i * i) & 0xFF);
     }
 
-    // 0x12345, 50000, and 0xABCDABCD are arbitrary values.
-    NativeAllocationRegistry registry = new NativeAllocationRegistry(
-        Main.class.getClassLoader(), 0x12345, 50000);
+    // 50000, 0xABCDABCD, and 0xBCDABCDA are arbitrary values.
+    NativeAllocationRegistry registry =
+        new NativeAllocationRegistry(Main.class.getClassLoader(), getNoopFreeFunction(), 50000);
     registry.registerNativeAllocation(anObject, 0xABCDABCD);
+
+    {
+      aCleanerThunk = registry.registerNativeAllocation(aCleanedObject, 0xBCDABCDA);
+      aCleanerThunk.run();
+    }
 
     {
       Object object = new Object();
@@ -85,6 +91,9 @@ public class DumpedStuff extends SuperDumpedStuff {
     }
 
     gcPathArray[2].right.left = gcPathArray[2].left.right;
+
+    bitmapOne = new Bitmap(100, 200, 0xDEADBEEF, bigArray);
+    bitmapTwo = new Bitmap(100, 200, 0xBEEFDEAD, bigArray);
   }
 
   public static class ObjectTree {
@@ -171,6 +180,8 @@ public class DumpedStuff extends SuperDumpedStuff {
   public char[] charArray = "char thing".toCharArray();
   public String nullString = null;
   public Object anObject = new Object();
+  public Object aCleanedObject = new Object();
+  public Runnable aCleanerThunk;
   public Reference aReference = new Reference(anObject);
   public ReferenceQueue<Object> referenceQueue = new ReferenceQueue<Object>();
   public PhantomReference aPhantomReference = new PhantomReference(anObject, referenceQueue);
@@ -179,6 +190,8 @@ public class DumpedStuff extends SuperDumpedStuff {
   public SoftReference aSoftReference = new SoftReference(new Object());
   public Reference reachabilityReferenceChain;
   public byte[] bigArray;
+  public Bitmap bitmapOne = null;
+  public Bitmap bitmapTwo = null;
   public ObjectTree[] gcPathArray = new ObjectTree[]{null, null,
     new ObjectTree(
         new ObjectTree(null, new ObjectTree(null, null)),
@@ -221,4 +234,10 @@ public class DumpedStuff extends SuperDumpedStuff {
         new SoftReference(
         new PhantomReference(new Object(), referenceQueue))))));
   }
+
+  static {
+    System.loadLibrary("ahat-test-jni");
+  }
+
+  private static native long getNoopFreeFunction();
 }

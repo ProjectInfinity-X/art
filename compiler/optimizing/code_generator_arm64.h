@@ -31,9 +31,10 @@
 #include "parallel_move_resolver.h"
 #include "utils/arm64/assembler_arm64.h"
 
-// TODO(VIXL): Make VIXL compile with -Wshadow.
+// TODO(VIXL): Make VIXL compile cleanly with -Wshadow, -Wdeprecated-declarations.
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wshadow"
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 #include "aarch64/disasm-aarch64.h"
 #include "aarch64/macro-assembler-aarch64.h"
 #pragma GCC diagnostic pop
@@ -54,6 +55,12 @@ static constexpr size_t kArm64WordSize = static_cast<size_t>(kArm64PointerSize);
 // This constant is used as an approximate margin when emission of veneer and literal pools
 // must be blocked.
 static constexpr int kMaxMacroInstructionSizeInBytes = 15 * vixl::aarch64::kInstructionSize;
+
+// Reference load (except object array loads) is using LDR Wt, [Xn, #offset] which can handle
+// offset < 16KiB. For offsets >= 16KiB, the load shall be emitted as two or more instructions.
+// For the Baker read barrier implementation using link-time generated thunks we need to split
+// the offset explicitly.
+static constexpr uint32_t kReferenceLoadMinFarOffset = 16 * KB;
 
 static const vixl::aarch64::Register kParameterCoreRegisters[] = {
     vixl::aarch64::x1,
@@ -124,6 +131,12 @@ const vixl::aarch64::CPURegList callee_saved_fp_registers(vixl::aarch64::CPURegi
 Location ARM64ReturnLocation(DataType::Type return_type);
 
 #define UNIMPLEMENTED_INTRINSIC_LIST_ARM64(V) \
+  V(MathSignumFloat)                          \
+  V(MathSignumDouble)                         \
+  V(MathCopySignFloat)                        \
+  V(MathCopySignDouble)                       \
+  V(IntegerRemainderUnsigned)                 \
+  V(LongRemainderUnsigned)                    \
   V(StringStringIndexOf)                      \
   V(StringStringIndexOfAfter)                 \
   V(StringBufferAppend)                       \
@@ -143,9 +156,12 @@ Location ARM64ReturnLocation(DataType::Type return_type);
   V(StringBuilderToString)                    \
   V(SystemArrayCopyByte)                      \
   V(SystemArrayCopyInt)                       \
+  V(UnsafeArrayBaseOffset)                    \
   /* 1.8 */                                   \
   V(MethodHandleInvokeExact)                  \
-  V(MethodHandleInvoke)
+  V(MethodHandleInvoke)                       \
+  /* OpenJDK 11 */                            \
+  V(JdkUnsafeArrayBaseOffset)
 
 class SlowPathCodeARM64 : public SlowPathCode {
  public:
@@ -817,6 +833,14 @@ class CodeGeneratorARM64 : public CodeGenerator {
                                               dex::TypeIndex type_index,
                                               vixl::aarch64::Label* adrp_label = nullptr);
 
+  // Add a new app image type patch for an instruction and return the label
+  // to be bound before the instruction. The instruction will be either the
+  // ADRP (pass `adrp_label = null`) or the LDR (pass `adrp_label` pointing
+  // to the associated ADRP patch label).
+  vixl::aarch64::Label* NewAppImageTypePatch(const DexFile& dex_file,
+                                             dex::TypeIndex type_index,
+                                             vixl::aarch64::Label* adrp_label = nullptr);
+
   // Add a new .bss entry type patch for an instruction and return the label
   // to be bound before the instruction. The instruction will be either the
   // ADRP (pass `adrp_label = null`) or the ADD (pass `adrp_label` pointing
@@ -1028,6 +1052,7 @@ class CodeGeneratorARM64 : public CodeGenerator {
 
   void MaybeGenerateInlineCacheCheck(HInstruction* instruction, vixl::aarch64::Register klass);
   void MaybeIncrementHotness(HSuspendCheck* suspend_check, bool is_frame_entry);
+  void MaybeRecordTraceEvent(bool is_method_entry);
 
   bool CanUseImplicitSuspendCheck() const;
 
@@ -1099,7 +1124,7 @@ class CodeGeneratorARM64 : public CodeGenerator {
                                     /*out*/ std::string* debug_name);
 
   // The PcRelativePatchInfo is used for PC-relative addressing of methods/strings/types,
-  // whether through .data.bimg.rel.ro, .bss, or directly in the boot image.
+  // whether through .data.img.rel.ro, .bss, or directly in the boot image.
   struct PcRelativePatchInfo : PatchInfo<vixl::aarch64::Label> {
     PcRelativePatchInfo(const DexFile* dex_file, uint32_t off_or_idx)
         : PatchInfo<vixl::aarch64::Label>(dex_file, off_or_idx), pc_insn_label() { }
@@ -1150,6 +1175,8 @@ class CodeGeneratorARM64 : public CodeGenerator {
   ArenaDeque<PcRelativePatchInfo> method_bss_entry_patches_;
   // PC-relative type patch info for kBootImageLinkTimePcRelative.
   ArenaDeque<PcRelativePatchInfo> boot_image_type_patches_;
+  // PC-relative type patch info for kAppImageRelRo.
+  ArenaDeque<PcRelativePatchInfo> app_image_type_patches_;
   // PC-relative type patch info for kBssEntry.
   ArenaDeque<PcRelativePatchInfo> type_bss_entry_patches_;
   // PC-relative public type patch info for kBssEntryPublic.

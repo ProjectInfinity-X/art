@@ -25,7 +25,7 @@
 #include "art_method.h"
 #include "base/atomic_pair.h"
 #include "base/casts.h"
-#include "base/enums.h"
+#include "base/pointer_size.h"
 #include "class_linker.h"
 #include "dex/dex_file.h"
 #include "gc_root-inl.h"
@@ -128,7 +128,7 @@ inline T* GcRootArray<T>::Get(uint32_t index) {
 
 inline uint32_t DexCache::ClassSize(PointerSize pointer_size) {
   const uint32_t vtable_entries = Object::kVTableLength;
-  return Class::ComputeClassSize(true, vtable_entries, 0, 0, 0, 0, 0, pointer_size);
+  return Class::ComputeClassSize(true, vtable_entries, 0, 0, 0, 0, 0, 0, pointer_size);
 }
 
 inline String* DexCache::GetResolvedString(dex::StringIndex string_idx) {
@@ -141,7 +141,7 @@ inline void DexCache::SetResolvedString(dex::StringIndex string_idx, ObjPtr<Stri
   Runtime* const runtime = Runtime::Current();
   if (UNLIKELY(runtime->IsActiveTransaction())) {
     DCHECK(runtime->IsAotCompiler());
-    runtime->RecordResolveString(this, string_idx);
+    runtime->GetClassLinker()->RecordResolveString(this, string_idx);
   }
   // TODO: Fine-grained marking, so that we don't need to go through all arrays in full.
   WriteBarrier::ForEveryFieldWrite(this);
@@ -188,7 +188,7 @@ inline void DexCache::SetResolvedMethodType(dex::ProtoIndex proto_idx, MethodTyp
   Runtime* const runtime = Runtime::Current();
   if (UNLIKELY(runtime->IsActiveTransaction())) {
     DCHECK(runtime->IsAotCompiler());
-    runtime->RecordResolveMethodType(this, proto_idx);
+    runtime->GetClassLinker()->RecordResolveMethodType(this, proto_idx);
   }
   // TODO: Fine-grained marking, so that we don't need to go through all arrays in full.
   WriteBarrier::ForEveryFieldWrite(this);
@@ -296,7 +296,7 @@ template <bool kVisitNativeRoots,
           typename Visitor>
 inline void DexCache::VisitReferences(ObjPtr<Class> klass, const Visitor& visitor) {
   // Visit instance fields first.
-  VisitInstanceFieldsReferences<kVerifyFlags, kReadBarrierOption>(klass, visitor);
+  VisitInstanceFieldsReferences<kVerifyFlags>(klass, visitor);
   // Visit arrays after.
   if (kVisitNativeRoots) {
     VisitNativeRoots<kVerifyFlags, kReadBarrierOption>(visitor);

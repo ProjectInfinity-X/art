@@ -66,14 +66,12 @@ static constexpr size_t kDefaultArenaBitVectorBytes = 8;
 
 class RegTypeCache {
  public:
-  RegTypeCache(ClassLinker* class_linker,
+  RegTypeCache(Thread* self,
+               ClassLinker* class_linker,
                bool can_load_classes,
                ScopedArenaAllocator& allocator,
-               VariableSizedHandleScope& handles,
                bool can_suspend = true);
   const art::verifier::RegType& GetFromId(uint16_t id) const;
-  const RegType& From(ObjPtr<mirror::ClassLoader> loader, const char* descriptor, bool precise)
-      REQUIRES_SHARED(Locks::mutator_lock_);
   // Find a RegType, returns null if not found.
   const RegType* FindClass(ObjPtr<mirror::Class> klass, bool precise) const
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -91,9 +89,7 @@ class RegTypeCache {
       REQUIRES_SHARED(Locks::mutator_lock_);
   const ConstantType& FromCat2ConstHi(int32_t value, bool precise)
       REQUIRES_SHARED(Locks::mutator_lock_);
-  const RegType& FromDescriptor(ObjPtr<mirror::ClassLoader> loader,
-                                const char* descriptor,
-                                bool precise)
+  const RegType& FromDescriptor(Handle<mirror::ClassLoader> loader, const char* descriptor)
       REQUIRES_SHARED(Locks::mutator_lock_);
   const RegType& FromUnresolvedMerge(const RegType& left,
                                      const RegType& right,
@@ -132,7 +128,7 @@ class RegTypeCache {
   const PreciseReferenceType& JavaLangString() REQUIRES_SHARED(Locks::mutator_lock_);
   const PreciseReferenceType& JavaLangInvokeMethodHandle() REQUIRES_SHARED(Locks::mutator_lock_);
   const PreciseReferenceType& JavaLangInvokeMethodType() REQUIRES_SHARED(Locks::mutator_lock_);
-  const RegType& JavaLangThrowable(bool precise) REQUIRES_SHARED(Locks::mutator_lock_);
+  const RegType& JavaLangThrowable() REQUIRES_SHARED(Locks::mutator_lock_);
   const RegType& JavaLangObject(bool precise) REQUIRES_SHARED(Locks::mutator_lock_);
 
   const UninitializedType& Uninitialized(const RegType& type, uint32_t allocation_pc)
@@ -148,12 +144,12 @@ class RegTypeCache {
   const ImpreciseConstType& IntConstant() REQUIRES_SHARED(Locks::mutator_lock_);
   const ImpreciseConstType& PosByteConstant() REQUIRES_SHARED(Locks::mutator_lock_);
   const ImpreciseConstType& PosShortConstant() REQUIRES_SHARED(Locks::mutator_lock_);
-  const RegType& GetComponentType(const RegType& array, ObjPtr<mirror::ClassLoader> loader)
+  const RegType& GetComponentType(const RegType& array, Handle<mirror::ClassLoader> loader)
       REQUIRES_SHARED(Locks::mutator_lock_);
   void Dump(std::ostream& os) REQUIRES_SHARED(Locks::mutator_lock_);
   const RegType& RegTypeFromPrimitiveType(Primitive::Type) const;
 
-  ClassLinker* GetClassLinker() {
+  ClassLinker* GetClassLinker() const {
     return class_linker_;
   }
 
@@ -181,11 +177,14 @@ class RegTypeCache {
 
  private:
   void FillPrimitiveAndSmallConstantTypes() REQUIRES_SHARED(Locks::mutator_lock_);
-  ObjPtr<mirror::Class> ResolveClass(const char* descriptor, ObjPtr<mirror::ClassLoader> loader)
+  ObjPtr<mirror::Class> ResolveClass(const char* descriptor, Handle<mirror::ClassLoader> loader)
       REQUIRES_SHARED(Locks::mutator_lock_);
   bool MatchDescriptor(size_t idx, const std::string_view& descriptor, bool precise)
       REQUIRES_SHARED(Locks::mutator_lock_);
   const ConstantType& FromCat1NonSmallConstant(int32_t value, bool precise)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  const RegType& From(Handle<mirror::ClassLoader> loader, const char* descriptor)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Returns the pass in RegType.
@@ -206,7 +205,7 @@ class RegTypeCache {
   ScopedArenaAllocator& allocator_;
 
   // Handle scope containing classes.
-  VariableSizedHandleScope& handles_;
+  VariableSizedHandleScope handles_;
   ScopedNullHandle<mirror::Class> null_handle_;
 
   ClassLinker* class_linker_;

@@ -340,29 +340,24 @@ class DexFile {
     return dex::StringIndex(&string_id - string_ids_);
   }
 
-  int32_t GetStringLength(const dex::StringId& string_id) const;
-
   // Returns a pointer to the UTF-8 string data referred to by the given string_id as well as the
   // length of the string when decoded as a UTF-16 string. Note the UTF-16 length is not the same
   // as the string length of the string data.
   const char* GetStringDataAndUtf16Length(const dex::StringId& string_id,
                                           uint32_t* utf16_length) const;
+  const char* GetStringDataAndUtf16Length(dex::StringIndex string_idx,
+                                          uint32_t* utf16_length) const;
+
+  uint32_t GetStringUtf16Length(const dex::StringId& string_id) const;
 
   const char* GetStringData(const dex::StringId& string_id) const;
+  const char* GetStringData(dex::StringIndex string_idx) const;
 
-  // Index version of GetStringDataAndUtf16Length.
-  const char* StringDataAndUtf16LengthByIdx(dex::StringIndex idx, uint32_t* utf16_length) const;
-
-  const char* StringDataByIdx(dex::StringIndex idx) const;
-  std::string_view StringViewByIdx(dex::StringIndex idx) const;
+  std::string_view GetStringView(const dex::StringId& string_id) const;
+  std::string_view GetStringView(dex::StringIndex string_idx) const;
 
   // Looks up a string id for a given modified utf8 string.
   const dex::StringId* FindStringId(const char* string) const;
-
-  const dex::TypeId* FindTypeId(const char* string) const;
-  const dex::TypeId* FindTypeId(std::string_view string) const {
-    return FindTypeId(std::string(string).c_str());
-  }
 
   // Returns the number of type identifiers in the .dex file.
   uint32_t NumTypeIds() const {
@@ -388,14 +383,13 @@ class DexFile {
     return dex::TypeIndex(static_cast<uint16_t>(result));
   }
 
-  // Get the descriptor string associated with a given type index.
-  const char* StringByTypeIdx(dex::TypeIndex idx, uint32_t* unicode_length) const;
-
-  const char* StringByTypeIdx(dex::TypeIndex idx) const;
-
   // Returns the type descriptor string of a type id.
   const char* GetTypeDescriptor(const dex::TypeId& type_id) const;
+  const char* GetTypeDescriptor(dex::TypeIndex type_idx) const;
   std::string_view GetTypeDescriptorView(const dex::TypeId& type_id) const;
+  std::string_view GetTypeDescriptorView(dex::TypeIndex type_idx) const;
+
+  const dex::TypeId* FindTypeId(std::string_view descriptor) const;
 
   // Looks up a type for the given string index
   const dex::TypeId* FindTypeId(dex::StringIndex string_idx) const;
@@ -436,18 +430,22 @@ class DexFile {
   virtual uint32_t GetCodeItemSize(const dex::CodeItem& disk_code_item) const = 0;
 
   // Returns the declaring class descriptor string of a field id.
-  const char* GetFieldDeclaringClassDescriptor(const dex::FieldId& field_id) const {
-    const dex::TypeId& type_id = GetTypeId(field_id.class_idx_);
-    return GetTypeDescriptor(type_id);
-  }
+  const char* GetFieldDeclaringClassDescriptor(const dex::FieldId& field_id) const;
+  const char* GetFieldDeclaringClassDescriptor(uint32_t field_idx) const;
+  std::string_view GetFieldDeclaringClassDescriptorView(const dex::FieldId& field_id) const;
+  std::string_view GetFieldDeclaringClassDescriptorView(uint32_t field_idx) const;
 
   // Returns the class descriptor string of a field id.
   const char* GetFieldTypeDescriptor(const dex::FieldId& field_id) const;
+  const char* GetFieldTypeDescriptor(uint32_t field_idx) const;
   std::string_view GetFieldTypeDescriptorView(const dex::FieldId& field_id) const;
+  std::string_view GetFieldTypeDescriptorView(uint32_t field_idx) const;
 
   // Returns the name of a field id.
   const char* GetFieldName(const dex::FieldId& field_id) const;
+  const char* GetFieldName(uint32_t field_idx) const;
   std::string_view GetFieldNameView(const dex::FieldId& field_id) const;
+  std::string_view GetFieldNameView(uint32_t field_idx) const;
 
   // Returns the number of method identifiers in the .dex file.
   size_t NumMethodIds() const {
@@ -478,6 +476,9 @@ class DexFile {
 
   // Returns the declaring class descriptor string of a method id.
   const char* GetMethodDeclaringClassDescriptor(const dex::MethodId& method_id) const;
+  const char* GetMethodDeclaringClassDescriptor(uint32_t method_idx) const;
+  std::string_view GetMethodDeclaringClassDescriptorView(const dex::MethodId& method_id) const;
+  std::string_view GetMethodDeclaringClassDescriptorView(uint32_t method_idx) const;
 
   // Returns the prototype of a method id.
   const dex::ProtoId& GetMethodPrototype(const dex::MethodId& method_id) const {
@@ -493,13 +494,14 @@ class DexFile {
   // Returns the name of a method id.
   const char* GetMethodName(const dex::MethodId& method_id) const;
   const char* GetMethodName(const dex::MethodId& method_id, uint32_t* utf_length) const;
-  const char* GetMethodName(uint32_t idx) const;
-  const char* GetMethodName(uint32_t idx, uint32_t* utf_length) const;
+  const char* GetMethodName(uint32_t method_idx) const;
+  const char* GetMethodName(uint32_t method_idx, uint32_t* utf_length) const;
   std::string_view GetMethodNameView(const dex::MethodId& method_id) const;
-  std::string_view GetMethodNameView(uint32_t idx) const;
+  std::string_view GetMethodNameView(uint32_t method_idx) const;
 
   // Returns the shorty of a method by its index.
   const char* GetMethodShorty(uint32_t idx) const;
+  std::string_view GetMethodShortyView(uint32_t idx) const;
 
   // Returns the shorty of a method id.
   const char* GetMethodShorty(const dex::MethodId& method_id) const;
@@ -703,12 +705,14 @@ class DexFile {
 
   const dex::AnnotationSetItem* GetFieldAnnotationSetItem(
       const dex::FieldAnnotationsItem& anno_item) const {
-    return DataPointer<dex::AnnotationSetItem>(anno_item.annotations_off_);
+    // `DexFileVerifier` checks that the offset is not zero.
+    return NonNullDataPointer<dex::AnnotationSetItem>(anno_item.annotations_off_);
   }
 
   const dex::AnnotationSetItem* GetMethodAnnotationSetItem(
       const dex::MethodAnnotationsItem& anno_item) const {
-    return DataPointer<dex::AnnotationSetItem>(anno_item.annotations_off_);
+    // `DexFileVerifier` checks that the offset is not zero.
+    return NonNullDataPointer<dex::AnnotationSetItem>(anno_item.annotations_off_);
   }
 
   const dex::AnnotationSetRefList* GetParameterAnnotationSetRefList(
@@ -794,7 +798,7 @@ class DexFile {
     if (!class_def.source_file_idx_.IsValid()) {
       return nullptr;
     } else {
-      return StringDataByIdx(class_def.source_file_idx_);
+      return GetStringData(class_def.source_file_idx_);
     }
   }
 
@@ -820,8 +824,14 @@ class DexFile {
 
   template <typename T>
   const T* DataPointer(size_t offset) const {
+    return (offset != 0u) ? NonNullDataPointer<T>(offset) : nullptr;
+  }
+
+  template <typename T>
+  const T* NonNullDataPointer(size_t offset) const {
+    DCHECK_NE(offset, 0u);
     DCHECK_LT(offset, DataSize()) << "Offset past end of data section";
-    return (offset != 0u) ? reinterpret_cast<const T*>(DataBegin() + offset) : nullptr;
+    return reinterpret_cast<const T*>(DataBegin() + offset);
   }
 
   const OatDexFile* GetOatDexFile() const {
@@ -897,6 +907,11 @@ class DexFile {
 
   static inline bool StringEquals(const DexFile* df1, dex::StringIndex sidx1,
                                   const DexFile* df2, dex::StringIndex sidx2);
+
+  static int CompareDescriptors(std::string_view lhs, std::string_view rhs);
+  static int CompareMemberNames(std::string_view lhs, std::string_view rhs);
+
+  static std::string_view StringViewFromUtf16Length(const char* utf8_data, size_t utf16_length);
 
  protected:
   // First Dex format version supporting default methods.
@@ -1030,7 +1045,7 @@ class DexFileParameterIterator {
     return type_list_->GetTypeItem(pos_).type_idx_;
   }
   const char* GetDescriptor() {
-    return dex_file_.StringByTypeIdx(dex::TypeIndex(GetTypeIdx()));
+    return dex_file_.GetTypeDescriptor(dex::TypeIndex(GetTypeIdx()));
   }
  private:
   const DexFile& dex_file_;

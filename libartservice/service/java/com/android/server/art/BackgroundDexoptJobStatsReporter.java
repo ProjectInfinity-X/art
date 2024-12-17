@@ -1,3 +1,19 @@
+/*
+ * Copyright (C) 2023 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.android.server.art;
 
 import static com.android.server.art.model.ArtFlags.BatchDexoptPass;
@@ -18,7 +34,7 @@ import java.util.Optional;
 import java.util.stream.Collectors;
 
 /**
- * This is an helper class to report the background DexOpt job metrics to StatsD.
+ * This is a helper class to report the background DexOpt job metrics to StatsD.
  *
  * @hide
  */
@@ -29,7 +45,7 @@ public class BackgroundDexoptJobStatsReporter {
         // simplicity.
         ArtStatsLog.write(ArtStatsLog.BACKGROUND_DEXOPT_JOB_ENDED,
                 ArtStatsLog.BACKGROUND_DEXOPT_JOB_ENDED__STATUS__STATUS_FATAL_ERROR,
-                JobParameters.STOP_REASON_UNDEFINED, 0 /* durationMs */, 0 /* deprecated */,
+                JobParameters.STOP_REASON_UNDEFINED, 0L /* durationMs */, 0L /* deprecated */,
                 0 /* optimizedPackagesCount */, 0 /* packagesDependingOnBootClasspathCount */,
                 0 /* totalPackagesCount */,
                 ArtStatsLog.BACKGROUND_DEXOPT_JOB_ENDED__PASS__PASS_MAIN);
@@ -58,7 +74,7 @@ public class BackgroundDexoptJobStatsReporter {
 
         ArtStatsLog.write(ArtStatsLog.BACKGROUND_DEXOPT_JOB_ENDED,
                 getStatusForStats(dexoptResult, stopReason), reportedStopReason, durationMs,
-                0 /* deprecated */, getDexoptedPackagesCount(packageDexoptResults),
+                0L /* deprecated */, getDexoptedPackagesCount(packageDexoptResults),
                 getPackagesDependingOnBootClasspathCount(packageDexoptResults),
                 packageDexoptResults.size(), toStatsdPassEnum(pass));
     }

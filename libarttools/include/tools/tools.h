@@ -17,9 +17,13 @@
 #ifndef ART_LIBARTTOOLS_INCLUDE_TOOLS_TOOLS_H_
 #define ART_LIBARTTOOLS_INCLUDE_TOOLS_TOOLS_H_
 
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include "android-base/result.h"
+#include "fstab/fstab.h"
 
 namespace art {
 namespace tools {
@@ -39,6 +43,24 @@ std::vector<std::string> Glob(const std::vector<std::string>& patterns,
 
 // Escapes a string so that it's not recognized as a wildcard pattern for `Glob`.
 std::string EscapeGlob(const std::string& str);
+
+// Returns true if `path` starts with `prefix` (i.e., if `prefix` represents a directory that
+// contains a file/directory at `path`, or if `prefix` and `path` represents the same
+// file/directory). Only supports absolute paths.
+bool PathStartsWith(std::string_view path, std::string_view prefix);
+
+// Returns the fstab entries in /proc/mounts where the mount point is a prefix of the given path.
+android::base::Result<std::vector<android::fs_mgr::FstabEntry>> GetProcMountsAncestorsOfPath(
+    std::string_view path);
+
+// Returns the fstab entries in /proc/mounts where the given path is a prefix of the mount point.
+android::base::Result<std::vector<android::fs_mgr::FstabEntry>> GetProcMountsDescendantsOfPath(
+    std::string_view path);
+
+// See `ArtJni.ensureNoProcessInDir`.
+android::base::Result<void> EnsureNoProcessInDir(const std::string& dir,
+                                                 uint32_t timeout_ms,
+                                                 bool try_kill);
 
 }  // namespace tools
 }  // namespace art

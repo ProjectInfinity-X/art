@@ -1548,7 +1548,7 @@ VarHandle::AccessMode VarHandle::GetAccessModeByIntrinsic(Intrinsics intrinsic) 
     default:
       break;
   }
-  LOG(FATAL) << "Unknown VarHandle instrinsic: " << static_cast<int>(intrinsic);
+  LOG(FATAL) << "Unknown VarHandle intrinsic: " << static_cast<int>(intrinsic);
   UNREACHABLE();
 }
 
@@ -1656,7 +1656,6 @@ int32_t VarHandle::GetNumberOfVarTypeParameters(AccessModeTemplate access_mode_t
     case AccessModeTemplate::kCompareAndExchange:
       return 2;
   }
-  UNREACHABLE();
 }
 
 bool FieldVarHandle::Access(AccessMode access_mode,

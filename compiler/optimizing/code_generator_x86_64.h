@@ -28,6 +28,8 @@
 namespace art HIDDEN {
 namespace x86_64 {
 
+static constexpr Register kMethodRegisterArgument = RDI;
+
 // Use a local definition to prevent copying mistakes.
 static constexpr size_t kX86_64WordSize = static_cast<size_t>(kX86_64PointerSize);
 
@@ -54,6 +56,10 @@ static constexpr size_t kRuntimeParameterFpuRegistersLength =
 static constexpr FloatRegister non_volatile_xmm_regs[] = { XMM12, XMM13, XMM14, XMM15 };
 
 #define UNIMPLEMENTED_INTRINSIC_LIST_X86_64(V) \
+  V(MathSignumFloat)                           \
+  V(MathSignumDouble)                          \
+  V(MathCopySignFloat)                         \
+  V(MathCopySignDouble)                        \
   V(CRC32Update)                               \
   V(CRC32UpdateBytes)                          \
   V(CRC32UpdateByteBuffer)                     \
@@ -69,6 +75,8 @@ static constexpr FloatRegister non_volatile_xmm_regs[] = { XMM12, XMM13, XMM14, 
   V(FP16Compare)                               \
   V(FP16Min)                                   \
   V(FP16Max)                                   \
+  V(IntegerRemainderUnsigned)                  \
+  V(LongRemainderUnsigned)                     \
   V(StringStringIndexOf)                       \
   V(StringStringIndexOfAfter)                  \
   V(StringBufferAppend)                        \
@@ -86,9 +94,11 @@ static constexpr FloatRegister non_volatile_xmm_regs[] = { XMM12, XMM13, XMM14, 
   V(StringBuilderAppendDouble)                 \
   V(StringBuilderLength)                       \
   V(StringBuilderToString)                     \
+  V(UnsafeArrayBaseOffset)                     \
   /* 1.8 */                                    \
-  V(MethodHandleInvokeExact)                   \
-  V(MethodHandleInvoke)
+  V(JdkUnsafeArrayBaseOffset)                  \
+  V(MethodHandleInvoke)                        \
+
 
 class InvokeRuntimeCallingConvention : public CallingConvention<Register, FloatRegister> {
  public:
@@ -237,6 +247,7 @@ class LocationsBuilderX86_64 : public HGraphVisitor {
   void HandleBitwiseOperation(HBinaryOperation* operation);
   void HandleCondition(HCondition* condition);
   void HandleShift(HBinaryOperation* operation);
+  void HandleRotate(HBinaryOperation* rotate);
   void HandleFieldSet(HInstruction* instruction,
                       const FieldInfo& field_info,
                       WriteBarrierKind write_barrier_kind);
@@ -310,6 +321,7 @@ class InstructionCodeGeneratorX86_64 : public InstructionCodeGenerator {
   void GenerateDivRemIntegral(HBinaryOperation* instruction);
   void HandleCondition(HCondition* condition);
   void HandleShift(HBinaryOperation* operation);
+  void HandleRotate(HBinaryOperation* rotate);
 
   void HandleFieldSet(HInstruction* instruction,
                       const FieldInfo& field_info,
@@ -532,6 +544,7 @@ class CodeGeneratorX86_64 : public CodeGenerator {
   void RecordBootImageMethodPatch(HInvoke* invoke);
   void RecordMethodBssEntryPatch(HInvoke* invoke);
   void RecordBootImageTypePatch(const DexFile& dex_file, dex::TypeIndex type_index);
+  void RecordAppImageTypePatch(const DexFile& dex_file, dex::TypeIndex type_index);
   Label* NewTypeBssEntryPatch(HLoadClass* load_class);
   void RecordBootImageStringPatch(HLoadString* load_string);
   Label* NewStringBssEntryPatch(HLoadString* load_string);
@@ -543,6 +556,9 @@ class CodeGeneratorX86_64 : public CodeGenerator {
   Label* NewJitRootClassPatch(const DexFile& dex_file,
                               dex::TypeIndex type_index,
                               Handle<mirror::Class> handle);
+  Label* NewJitRootMethodTypePatch(const DexFile& dex_file,
+                                   dex::ProtoIndex proto_index,
+                                   Handle<mirror::MethodType> method_type);
 
   void LoadBootImageAddress(CpuRegister reg, uint32_t boot_image_reference);
   void LoadIntrinsicDeclaringClass(CpuRegister reg, HInvoke* invoke);
@@ -738,6 +754,8 @@ class CodeGeneratorX86_64 : public CodeGenerator {
   ArenaDeque<PatchInfo<Label>> method_bss_entry_patches_;
   // PC-relative type patch info for kBootImageLinkTimePcRelative.
   ArenaDeque<PatchInfo<Label>> boot_image_type_patches_;
+  // PC-relative type patch info for kAppImageRelRo.
+  ArenaDeque<PatchInfo<Label>> app_image_type_patches_;
   // PC-relative type patch info for kBssEntry.
   ArenaDeque<PatchInfo<Label>> type_bss_entry_patches_;
   // PC-relative public type patch info for kBssEntryPublic.
@@ -760,6 +778,8 @@ class CodeGeneratorX86_64 : public CodeGenerator {
   ArenaDeque<PatchInfo<Label>> jit_string_patches_;
   // Patches for class literals in JIT compiled code.
   ArenaDeque<PatchInfo<Label>> jit_class_patches_;
+  // Patches for method type in JIT compiled code.
+  ArenaDeque<PatchInfo<Label>> jit_method_type_patches_;
 
   // Fixups for jump tables need to be handled specially.
   ArenaVector<JumpTableRIPFixup*> fixups_to_jump_tables_;

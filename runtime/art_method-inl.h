@@ -31,6 +31,8 @@
 #include "dex/signature.h"
 #include "gc_root-inl.h"
 #include "imtable-inl.h"
+#include "jit/jit.h"
+#include "jit/jit_code_cache-inl.h"
 #include "jit/jit_options.h"
 #include "mirror/class-inl.h"
 #include "mirror/dex_cache-inl.h"
@@ -381,13 +383,15 @@ inline const DexFile* ArtMethod::GetDexFile() {
 }
 
 inline const char* ArtMethod::GetDeclaringClassDescriptor() {
-  uint32_t dex_method_idx = GetDexMethodIndex();
-  if (UNLIKELY(dex_method_idx == dex::kDexNoIndex)) {
-    return "<runtime method>";
-  }
+  DCHECK(!IsRuntimeMethod());
   DCHECK(!IsProxyMethod());
-  const DexFile* dex_file = GetDexFile();
-  return dex_file->GetMethodDeclaringClassDescriptor(dex_file->GetMethodId(dex_method_idx));
+  return GetDexFile()->GetMethodDeclaringClassDescriptor(GetDexMethodIndex());
+}
+
+inline std::string_view ArtMethod::GetDeclaringClassDescriptorView() {
+  DCHECK(!IsRuntimeMethod());
+  DCHECK(!IsProxyMethod());
+  return GetDexFile()->GetMethodDeclaringClassDescriptorView(GetDexMethodIndex());
 }
 
 inline const char* ArtMethod::GetShorty() {
@@ -449,7 +453,7 @@ inline bool ArtMethod::NameEquals(ObjPtr<mirror::String> name) {
   const dex::MethodId& method_id = dex_file->GetMethodId(GetDexMethodIndex());
   const dex::StringIndex name_idx = method_id.name_idx_;
   uint32_t utf16_length;
-  const char* utf8_name = dex_file->StringDataAndUtf16LengthByIdx(name_idx, &utf16_length);
+  const char* utf8_name = dex_file->GetStringDataAndUtf16Length(name_idx, &utf16_length);
   return dchecked_integral_cast<uint32_t>(name->GetLength()) == utf16_length &&
          name->Equals(utf8_name);
 }
@@ -464,11 +468,6 @@ inline const dex::CodeItem* ArtMethod::GetCodeItem() {
       ? GetDexFile()->GetCodeItem(reinterpret_cast32<uint32_t>(GetDataPtrSize(pointer_size)))
       : reinterpret_cast<const dex::CodeItem*>(
           reinterpret_cast<uintptr_t>(GetDataPtrSize(pointer_size)) & ~1);
-}
-
-inline bool ArtMethod::IsResolvedTypeIdx(dex::TypeIndex type_idx) {
-  DCHECK(!IsProxyMethod());
-  return LookupResolvedClassFromTypeIndex(type_idx) != nullptr;
 }
 
 inline int32_t ArtMethod::GetLineNumFromDexPC(uint32_t dex_pc) {
@@ -520,9 +519,11 @@ inline size_t ArtMethod::GetNumberOfParameters() {
 }
 
 inline const char* ArtMethod::GetReturnTypeDescriptor() {
-  DCHECK(!IsProxyMethod());
-  const DexFile* dex_file = GetDexFile();
-  return dex_file->GetTypeDescriptor(dex_file->GetTypeId(GetReturnTypeIndex()));
+  return GetDexFile()->GetTypeDescriptor(GetReturnTypeIndex());
+}
+
+inline std::string_view ArtMethod::GetReturnTypeDescriptorView() {
+  return GetDexFile()->GetTypeDescriptorView(GetReturnTypeIndex());
 }
 
 inline Primitive::Type ArtMethod::GetReturnTypePrimitive() {
@@ -578,6 +579,7 @@ inline ArtMethod* ArtMethod::GetInterfaceMethodIfProxy(PointerSize pointer_size)
 }
 
 inline dex::TypeIndex ArtMethod::GetReturnTypeIndex() {
+  DCHECK(!IsRuntimeMethod());
   DCHECK(!IsProxyMethod());
   const DexFile* dex_file = GetDexFile();
   const dex::MethodId& method_id = dex_file->GetMethodId(GetDexMethodIndex());
@@ -618,6 +620,13 @@ void ArtMethod::VisitRoots(RootVisitorType& visitor, PointerSize pointer_size) {
         interface_method->VisitRoots<kReadBarrierOption, kVisitProxyMethod>(visitor, pointer_size);
       }
     }
+  }
+
+  // JIT-ted code can hold references to heap objects like MethodType-s. Visiting them here to
+  // treat them as strongly reachable.
+  Runtime* runtime = Runtime::Current();
+  if (runtime->GetJit() != nullptr) {
+    runtime->GetJit()->GetCodeCache()->VisitRootTables(this, visitor);
   }
 }
 
@@ -661,22 +670,6 @@ void ArtMethod::VisitArrayRoots(RootVisitorType& visitor,
     visitor.VisitRootIfNonNull(
         reinterpret_cast<mirror::CompressedReference<mirror::Object>*>(declaring_class));
     declaring_class += kMethodSize;
-  }
-}
-
-template <typename Visitor>
-inline void ArtMethod::UpdateEntrypoints(const Visitor& visitor, PointerSize pointer_size) {
-  if (IsNative()) {
-    const void* old_native_code = GetEntryPointFromJniPtrSize(pointer_size);
-    const void* new_native_code = visitor(old_native_code);
-    if (old_native_code != new_native_code) {
-      SetEntryPointFromJniPtrSize(new_native_code, pointer_size);
-    }
-  }
-  const void* old_code = GetEntryPointFromQuickCompiledCodePtrSize(pointer_size);
-  const void* new_code = visitor(old_code);
-  if (old_code != new_code) {
-    SetEntryPointFromQuickCompiledCodePtrSize(new_code, pointer_size);
   }
 }
 
@@ -775,13 +768,6 @@ inline void ArtMethod::UpdateCounter(int32_t new_samples) {
 inline bool ArtMethod::CounterIsHot() {
   DCHECK(!IsAbstract());
   return hotness_count_ == 0;
-}
-
-inline bool ArtMethod::CounterHasReached(uint16_t samples, uint16_t threshold) {
-  DCHECK(!IsAbstract());
-  DCHECK_EQ(threshold, Runtime::Current()->GetJITOptions()->GetWarmupThreshold());
-  DCHECK_LE(samples, threshold);
-  return hotness_count_ <= (threshold - samples);
 }
 
 inline uint16_t ArtMethod::GetCounter() {

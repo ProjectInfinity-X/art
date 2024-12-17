@@ -20,6 +20,7 @@ package {
     // to get the below license kinds:
     //   SPDX-license-identifier-Apache-2.0
     default_applicable_licenses: ["art_license"],
+    default_team: "trendy_team_art_mainline",
 }
 
 cc_defaults {
@@ -32,10 +33,11 @@ cc_defaults {
     ],
     header_libs: [
         "art_cmdlineparser_headers",
+        "libarttools_binder_utils",
+        "odrefresh_headers_art",
         "profman_headers",
     ],
     shared_libs: [
-        "libbase",
         "libbinder_ndk",
         "libselinux",
     ],
@@ -43,6 +45,11 @@ cc_defaults {
         "artd-aidl-ndk",
         "libfstab",
     ],
+    target: {
+        android: {
+            compile_multilib: "first",
+        },
+    },
 }
 
 art_cc_binary {
@@ -55,7 +62,8 @@ art_cc_binary {
         "libart",
         "libartbase",
         "libartservice",
-        "libarttools", // Contains "libc++fs".
+        "libarttools",
+        "libbase",
         "libdexfile",
     ],
     apex_available: [
@@ -81,7 +89,7 @@ art_cc_defaults {
     ],
 }
 
-// Version of ART gtest `art_artd_tests` bundled with the ART APEX on target.
+// Version of ART gtest `art_artd_tests` for host.
 //
 // This test requires the full libbinder_ndk implementation on host, which is
 // not available as a prebuilt on the thin master-art branch. Hence it won't
@@ -89,6 +97,7 @@ art_cc_defaults {
 // test-art-host-gtest.
 art_cc_test {
     name: "art_artd_tests",
+    device_supported: false,
     defaults: [
         "art_gtest_defaults",
         "art_artd_tests_defaults",
@@ -96,6 +105,7 @@ art_cc_test {
     shared_libs: [
         "libartservice",
         "libarttools",
+        "libbase",
         "libdexfile",
     ],
 }
@@ -111,6 +121,7 @@ art_cc_test {
     static_libs: [
         "libartservice",
         "libarttools",
+        "libbase",
         "libdexfile",
     ],
     test_config_template: "art_standalone_artd_tests.xml",
@@ -120,7 +131,6 @@ cc_fuzz {
     name: "artd_fuzzer",
     defaults: [
         "service_fuzzer_defaults",
-        "art_module_source_build_defaults",
         "artd_defaults",
         // Fuzzer is on a special variant, different from the APEX variant. When
         // linking against "libdexfile" as a shared library, the build system
@@ -136,6 +146,7 @@ cc_fuzz {
         "libartbase",
         "libartservice",
         "libarttools",
+        "libbase",
         "libdexfile",
         "liblog",
     ],

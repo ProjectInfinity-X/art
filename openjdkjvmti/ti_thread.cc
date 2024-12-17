@@ -32,7 +32,6 @@
 #include "ti_thread.h"
 
 #include <android-base/logging.h>
-#include <android-base/strings.h>
 
 #include "art_field-inl.h"
 #include "art_jvmti.h"
@@ -130,9 +129,9 @@ struct ThreadCallback : public art::ThreadLifecycleCallback {
         self->GetThreadName(name);
         if (name != "JDWP" && name != "Signal Catcher" && name != "perfetto_hprof_listener" &&
             name != art::metrics::MetricsReporter::kBackgroundThreadName &&
-            !android::base::StartsWith(name, "Jit thread pool") &&
-            !android::base::StartsWith(name, "Heap thread pool worker thread") &&
-            !android::base::StartsWith(name, "Runtime worker thread")) {
+            !name.starts_with("Jit thread pool") &&
+            !name.starts_with("Heap thread pool worker thread") &&
+            !name.starts_with("Runtime worker thread")) {
           LOG(FATAL) << "Unexpected thread before start: " << name << " id: "
                      << self->GetThreadId();
         }
@@ -489,6 +488,7 @@ static jint GetJvmtiThreadStateFromInternal(const InternalThreadState& state) {
     case art::ThreadState::kObsoleteRunnable:  // Obsolete value.
     case art::ThreadState::kStarting:
     case art::ThreadState::kTerminated:
+    case art::ThreadState::kInvalidState:
       // We only call this if we are alive so we shouldn't see either of these states.
       LOG(FATAL) << "Should not be in state " << internal_thread_state;
       UNREACHABLE();
@@ -541,7 +541,8 @@ static jint GetJavaStateFromInternal(const InternalThreadState& state) {
       return JVMTI_JAVA_LANG_THREAD_STATE_WAITING;
 
     case art::ThreadState::kObsoleteRunnable:
-      break;  // Obsolete value.
+    case art::ThreadState::kInvalidState:
+      break;  // Obsolete or invalid value.
   }
   LOG(FATAL) << "Unreachable";
   UNREACHABLE();
@@ -924,7 +925,6 @@ jvmtiError ThreadUtil::SuspendOther(art::Thread* self,
     }
     // We timed out. Just go around and try again.
   } while (true);
-  UNREACHABLE();
 }
 
 jvmtiError ThreadUtil::SuspendSelf(art::Thread* self) {

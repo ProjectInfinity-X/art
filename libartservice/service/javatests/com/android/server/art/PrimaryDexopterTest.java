@@ -47,6 +47,7 @@ import androidx.test.runner.AndroidJUnit4;
 import com.android.server.art.model.ArtFlags;
 import com.android.server.art.model.DexoptParams;
 import com.android.server.art.model.DexoptResult;
+import com.android.server.art.proto.DexMetadataConfig;
 import com.android.server.art.testing.TestingUtils;
 
 import org.junit.Before;
@@ -54,6 +55,7 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.InOrder;
 
+import java.nio.file.NoSuchFileException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ForkJoinPool;
@@ -61,24 +63,28 @@ import java.util.concurrent.Future;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
+import java.util.zip.ZipFile;
 
 @SmallTest
 @RunWith(AndroidJUnit4.class)
 public class PrimaryDexopterTest extends PrimaryDexopterTestBase {
     private final String mDexPath = "/somewhere/app/foo/base.apk";
+    private final String mDmPath = "/somewhere/app/foo/base.dm";
     private final ProfilePath mRefProfile =
-            AidlUtils.buildProfilePathForPrimaryRef(PKG_NAME, "primary");
+            AidlUtils.buildProfilePathForPrimaryRefAsInput(PKG_NAME, "primary");
     private final ProfilePath mPrebuiltProfile = AidlUtils.buildProfilePathForPrebuilt(mDexPath);
     private final ProfilePath mDmProfile = AidlUtils.buildProfilePathForDm(mDexPath);
     private final DexMetadataPath mDmFile = AidlUtils.buildDexMetadataPath(mDexPath);
-    private final OutputProfile mPublicOutputProfile = AidlUtils.buildOutputProfileForPrimary(
-            PKG_NAME, "primary", Process.SYSTEM_UID, SHARED_GID, true /* isOtherReadable */);
-    private final OutputProfile mPrivateOutputProfile = AidlUtils.buildOutputProfileForPrimary(
-            PKG_NAME, "primary", Process.SYSTEM_UID, SHARED_GID, false /* isOtherReadable */);
+    private final OutputProfile mPublicOutputProfile =
+            AidlUtils.buildOutputProfileForPrimary(PKG_NAME, "primary", Process.SYSTEM_UID,
+                    SHARED_GID, true /* isOtherReadable */, false /* isPreReboot */);
+    private final OutputProfile mPrivateOutputProfile =
+            AidlUtils.buildOutputProfileForPrimary(PKG_NAME, "primary", Process.SYSTEM_UID,
+                    SHARED_GID, false /* isOtherReadable */, false /* isPreReboot */);
 
     private final String mSplit0DexPath = "/somewhere/app/foo/split_0.apk";
     private final ProfilePath mSplit0RefProfile =
-            AidlUtils.buildProfilePathForPrimaryRef(PKG_NAME, "split_0.split");
+            AidlUtils.buildProfilePathForPrimaryRefAsInput(PKG_NAME, "split_0.split");
 
     private final int mDefaultDexoptTrigger = DexoptTrigger.COMPILER_FILTER_IS_BETTER
             | DexoptTrigger.PRIMARY_BOOT_IMAGE_BECOMES_USABLE | DexoptTrigger.NEED_EXTRACTION;
@@ -117,7 +123,12 @@ public class PrimaryDexopterTest extends PrimaryDexopterTestBase {
                 .thenReturn(TestingUtils.createCopyAndRewriteProfileNoProfile());
 
         // By default, no DM file exists.
-        lenient().when(mArtd.getDmFileVisibility(any())).thenReturn(FileVisibility.NOT_FOUND);
+        lenient()
+                .when(mDexMetadataHelperInjector.openZipFile(any()))
+                .thenThrow(NoSuchFileException.class);
+
+        // By default, no artifacts exist.
+        lenient().when(mArtd.getArtifactsVisibility(any())).thenReturn(FileVisibility.NOT_FOUND);
 
         // Dexopt is by default needed and successful.
         lenient()
@@ -131,6 +142,13 @@ public class PrimaryDexopterTest extends PrimaryDexopterTestBase {
         lenient()
                 .when(mArtd.createCancellationSignal())
                 .thenReturn(mock(IArtdCancellationSignal.class));
+
+        lenient()
+                .when(mArtd.getDexFileVisibility(mDexPath))
+                .thenReturn(FileVisibility.OTHER_READABLE);
+        lenient()
+                .when(mArtd.getDexFileVisibility(mSplit0DexPath))
+                .thenReturn(FileVisibility.OTHER_READABLE);
 
         mPrimaryDexopter =
                 new PrimaryDexopter(mInjector, mPkgState, mPkg, mDexoptParams, mCancellationSignal);
@@ -157,7 +175,7 @@ public class PrimaryDexopterTest extends PrimaryDexopterTestBase {
         doReturn(mArtdDexoptResult)
                 .when(mArtd)
                 .dexopt(any(), eq(mDexPath), eq("arm"), any(), any(), any(),
-                        deepEq(VdexPath.artifactsPath(AidlUtils.buildArtifactsPath(
+                        deepEq(VdexPath.artifactsPath(AidlUtils.buildArtifactsPathAsInput(
                                 mDexPath, "arm", true /* isInDalvikCache */))),
                         any(), anyInt(), any(), any());
 
@@ -168,7 +186,7 @@ public class PrimaryDexopterTest extends PrimaryDexopterTestBase {
         doReturn(mArtdDexoptResult)
                 .when(mArtd)
                 .dexopt(any(), eq(mSplit0DexPath), eq("arm64"), any(), any(), any(),
-                        deepEq(VdexPath.artifactsPath(AidlUtils.buildArtifactsPath(
+                        deepEq(VdexPath.artifactsPath(AidlUtils.buildArtifactsPathAsInput(
                                 mSplit0DexPath, "arm64", false /* isInDalvikCache */))),
                         any(), anyInt(), any(), any());
 
@@ -187,9 +205,8 @@ public class PrimaryDexopterTest extends PrimaryDexopterTestBase {
 
     @Test
     public void testDexoptDm() throws Exception {
-        lenient()
-                .when(mArtd.getDmFileVisibility(deepEq(mDmFile)))
-                .thenReturn(FileVisibility.OTHER_READABLE);
+        String dmPath = TestingUtils.createTempZipWithEntry("primary.vdex", new byte[0] /* data */);
+        doReturn(new ZipFile(dmPath)).when(mDexMetadataHelperInjector).openZipFile(mDmPath);
 
         List<DexContainerFileDexoptResult> results = mPrimaryDexopter.dexopt();
         verifyStatusAllOk(results);
@@ -298,8 +315,7 @@ public class PrimaryDexopterTest extends PrimaryDexopterTestBase {
         verifyEmbeddedProfileNotUsed(mDexPath);
     }
 
-    @Test
-    public void testDexoptMergesProfiles() throws Exception {
+    private void checkDexoptMergesProfiles() throws Exception {
         setPackageInstalledForUserIds(0, 2);
 
         when(mArtd.mergeProfiles(any(), any(), any(), any(), any())).thenReturn(true);
@@ -335,11 +351,27 @@ public class PrimaryDexopterTest extends PrimaryDexopterTestBase {
                 false /* isOtherReadable */);
 
         inOrder.verify(mArtd).commitTmpProfile(deepEq(mPrivateOutputProfile.profilePath));
+    }
 
-        inOrder.verify(mArtd).deleteProfile(deepEq(
+    @Test
+    public void testDexoptMergesProfiles() throws Exception {
+        checkDexoptMergesProfiles();
+
+        verify(mArtd).deleteProfile(deepEq(
                 AidlUtils.buildProfilePathForPrimaryCur(0 /* userId */, PKG_NAME, "primary")));
-        inOrder.verify(mArtd).deleteProfile(deepEq(
+        verify(mArtd).deleteProfile(deepEq(
                 AidlUtils.buildProfilePathForPrimaryCur(2 /* userId */, PKG_NAME, "primary")));
+    }
+
+    @Test
+    public void testDexoptMergesProfilesPreReboot() throws Exception {
+        when(mInjector.isPreReboot()).thenReturn(true);
+        mPublicOutputProfile.profilePath.finalPath.getForPrimary().isPreReboot = true;
+        mPrivateOutputProfile.profilePath.finalPath.getForPrimary().isPreReboot = true;
+
+        checkDexoptMergesProfiles();
+
+        verify(mArtd, never()).deleteProfile(any());
     }
 
     @Test
@@ -392,8 +424,7 @@ public class PrimaryDexopterTest extends PrimaryDexopterTestBase {
         mPrimaryDexopter.dexopt();
     }
 
-    @Test
-    public void testDexoptUsesDmProfile() throws Exception {
+    private void checkDexoptUsesDmProfile() throws Exception {
         makeProfileUsable(mDmProfile);
         makeEmbeddedProfileUsable(mDexPath);
 
@@ -416,7 +447,20 @@ public class PrimaryDexopterTest extends PrimaryDexopterTestBase {
     }
 
     @Test
-    public void testDexoptUsesEmbeddedProfile() throws Exception {
+    public void testDexoptUsesDmProfile() throws Exception {
+        checkDexoptUsesDmProfile();
+    }
+
+    @Test
+    public void testDexoptUsesDmProfilePreReboot() throws Exception {
+        when(mInjector.isPreReboot()).thenReturn(true);
+        mPublicOutputProfile.profilePath.finalPath.getForPrimary().isPreReboot = true;
+        mPrivateOutputProfile.profilePath.finalPath.getForPrimary().isPreReboot = true;
+
+        checkDexoptUsesDmProfile();
+    }
+
+    private void checkDexoptUsesEmbeddedProfile() throws Exception {
         makeEmbeddedProfileUsable(mDexPath);
 
         List<DexContainerFileDexoptResult> results = mPrimaryDexopter.dexopt();
@@ -435,6 +479,74 @@ public class PrimaryDexopterTest extends PrimaryDexopterTestBase {
         verifyProfileNotUsed(mRefProfile);
         verifyProfileNotUsed(mPrebuiltProfile);
         verifyProfileNotUsed(mDmProfile);
+    }
+
+    @Test
+    public void testDexoptUsesEmbeddedProfileNoDm() throws Exception {
+        checkDexoptUsesEmbeddedProfile();
+    }
+
+    @Test
+    public void testDexoptUsesEmbeddedProfileDmNoConfig() throws Exception {
+        String dmPath = TestingUtils.createTempZipWithEntry("primary.vdex", new byte[0] /* data */);
+        doReturn(new ZipFile(dmPath)).when(mDexMetadataHelperInjector).openZipFile(mDmPath);
+        checkDexoptUsesEmbeddedProfile();
+    }
+
+    @Test
+    public void testDexoptUsesEmbeddedProfileDmEmptyConfig() throws Exception {
+        String dmPath = TestingUtils.createTempZipWithEntry("config.pb", new byte[0] /* data */);
+        doReturn(new ZipFile(dmPath)).when(mDexMetadataHelperInjector).openZipFile(mDmPath);
+        checkDexoptUsesEmbeddedProfile();
+    }
+
+    @Test
+    public void testDexoptUsesEmbeddedProfileDmBadConfig() throws Exception {
+        String dmPath = TestingUtils.createTempZipWithEntry(
+                "config.pb", new byte[] {0x42, 0x43, 0x44} /* data */);
+        doReturn(new ZipFile(dmPath)).when(mDexMetadataHelperInjector).openZipFile(mDmPath);
+        checkDexoptUsesEmbeddedProfile();
+    }
+
+    @Test
+    public void testDexoptUsesEmbeddedProfileDmDisableEmbeddedProfile() throws Exception {
+        var config = DexMetadataConfig.newBuilder().setEnableEmbeddedProfile(false).build();
+        String dmPath = TestingUtils.createTempZipWithEntry("config.pb", config.toByteArray());
+        doReturn(new ZipFile(dmPath)).when(mDexMetadataHelperInjector).openZipFile(mDmPath);
+
+        makeEmbeddedProfileUsable(mDexPath);
+
+        List<DexContainerFileDexoptResult> results = mPrimaryDexopter.dexopt();
+        verifyStatusAllOk(results);
+
+        checkDexoptWithNoProfile(verify(mArtd), mDexPath, "arm64", "verify");
+        checkDexoptWithNoProfile(verify(mArtd), mDexPath, "arm", "verify");
+
+        verifyEmbeddedProfileNotUsed(mDexPath);
+    }
+
+    @Test
+    public void testDexoptUsesEmbeddedProfileNoEmbeddedProfile() throws Exception {
+        var config = DexMetadataConfig.newBuilder().setEnableEmbeddedProfile(true).build();
+        String dmPath = TestingUtils.createTempZipWithEntry("config.pb", config.toByteArray());
+        doReturn(new ZipFile(dmPath)).when(mDexMetadataHelperInjector).openZipFile(mDmPath);
+
+        List<DexContainerFileDexoptResult> results = mPrimaryDexopter.dexopt();
+        verifyStatusAllOk(results);
+
+        checkDexoptWithNoProfile(verify(mArtd), mDexPath, "arm64", "verify");
+        checkDexoptWithNoProfile(verify(mArtd), mDexPath, "arm", "verify");
+
+        verifyEmbeddedProfileNotUsed(mDexPath);
+    }
+
+    @Test
+    public void testDexoptUsesEmbeddedProfilePreReboot() throws Exception {
+        when(mInjector.isPreReboot()).thenReturn(true);
+        mPublicOutputProfile.profilePath.finalPath.getForPrimary().isPreReboot = true;
+        mPrivateOutputProfile.profilePath.finalPath.getForPrimary().isPreReboot = true;
+
+        checkDexoptUsesEmbeddedProfile();
     }
 
     @Test
@@ -465,7 +577,7 @@ public class PrimaryDexopterTest extends PrimaryDexopterTestBase {
 
         when(mArtd.dexopt(any(), eq(mDexPath), any(), any(), any(), any(), any(), any(), anyInt(),
                      any(), any()))
-                .thenThrow(ServiceSpecificException.class);
+                .thenThrow(new ServiceSpecificException(42, "This is an error message"));
 
         mPrimaryDexopter.dexopt();
 
@@ -746,6 +858,95 @@ public class PrimaryDexopterTest extends PrimaryDexopterTestBase {
         assertThat(
                 results.get(3).getExtendedStatusFlags() & DexoptResult.EXTENDED_SKIPPED_NO_DEX_CODE)
                 .isEqualTo(0);
+    }
+
+    @Test
+    public void testDexoptPreRebootDexNotFound() throws Exception {
+        when(mInjector.isPreReboot()).thenReturn(true);
+        doReturn(FileVisibility.NOT_FOUND).when(mArtd).getDexFileVisibility(mDexPath);
+        doReturn(FileVisibility.NOT_FOUND).when(mArtd).getDexFileVisibility(mSplit0DexPath);
+
+        mPrimaryDexopter =
+                new PrimaryDexopter(mInjector, mPkgState, mPkg, mDexoptParams, mCancellationSignal);
+
+        List<DexContainerFileDexoptResult> results = mPrimaryDexopter.dexopt();
+        assertThat(results).hasSize(0);
+    }
+
+    @Test
+    public void testDexoptPreRebootSomeDexNotFound() throws Exception {
+        when(mInjector.isPreReboot()).thenReturn(true);
+        doReturn(FileVisibility.OTHER_READABLE).when(mArtd).getDexFileVisibility(mDexPath);
+        doReturn(FileVisibility.NOT_FOUND).when(mArtd).getDexFileVisibility(mSplit0DexPath);
+
+        mPrimaryDexopter =
+                new PrimaryDexopter(mInjector, mPkgState, mPkg, mDexoptParams, mCancellationSignal);
+
+        List<DexContainerFileDexoptResult> results = mPrimaryDexopter.dexopt();
+        assertThat(results).hasSize(2);
+        assertThat(results.get(0).getDexContainerFile()).isEqualTo(mDexPath);
+        assertThat(results.get(0).getAbi()).isEqualTo("arm64-v8a");
+        assertThat(results.get(1).getDexContainerFile()).isEqualTo(mDexPath);
+        assertThat(results.get(1).getAbi()).isEqualTo("armeabi-v7a");
+    }
+
+    @Test
+    public void testDexoptPreRebootArtifactsExist() throws Exception {
+        when(mInjector.isPreReboot()).thenReturn(true);
+
+        when(mArtd.getArtifactsVisibility(deepEq(AidlUtils.buildArtifactsPathAsInputPreReboot(
+                     mDexPath, "arm", false /* isInDalvikCache */))))
+                .thenReturn(FileVisibility.OTHER_READABLE);
+
+        mPrimaryDexopter =
+                new PrimaryDexopter(mInjector, mPkgState, mPkg, mDexoptParams, mCancellationSignal);
+
+        List<DexContainerFileDexoptResult> results = mPrimaryDexopter.dexopt();
+        // Only the one at index 1 is skipped.
+        assertThat(results).hasSize(4);
+        assertThat(results.get(0).getDexContainerFile()).isEqualTo(mDexPath);
+        assertThat(results.get(0).getAbi()).isEqualTo("arm64-v8a");
+        assertThat(results.get(0).getStatus()).isEqualTo(DexoptResult.DEXOPT_PERFORMED);
+        assertThat(results.get(0).getExtendedStatusFlags()
+                & DexoptResult.EXTENDED_SKIPPED_PRE_REBOOT_ALREADY_EXIST)
+                .isEqualTo(0);
+        assertThat(results.get(1).getDexContainerFile()).isEqualTo(mDexPath);
+        assertThat(results.get(1).getAbi()).isEqualTo("armeabi-v7a");
+        assertThat(results.get(1).getStatus()).isEqualTo(DexoptResult.DEXOPT_SKIPPED);
+        assertThat(results.get(1).getExtendedStatusFlags()
+                & DexoptResult.EXTENDED_SKIPPED_PRE_REBOOT_ALREADY_EXIST)
+                .isNotEqualTo(0);
+        assertThat(results.get(2).getDexContainerFile()).isEqualTo(mSplit0DexPath);
+        assertThat(results.get(2).getAbi()).isEqualTo("arm64-v8a");
+        assertThat(results.get(2).getStatus()).isEqualTo(DexoptResult.DEXOPT_PERFORMED);
+        assertThat(results.get(2).getExtendedStatusFlags()
+                & DexoptResult.EXTENDED_SKIPPED_PRE_REBOOT_ALREADY_EXIST)
+                .isEqualTo(0);
+        assertThat(results.get(3).getDexContainerFile()).isEqualTo(mSplit0DexPath);
+        assertThat(results.get(3).getAbi()).isEqualTo("armeabi-v7a");
+        assertThat(results.get(3).getStatus()).isEqualTo(DexoptResult.DEXOPT_PERFORMED);
+        assertThat(results.get(3).getExtendedStatusFlags()
+                & DexoptResult.EXTENDED_SKIPPED_PRE_REBOOT_ALREADY_EXIST)
+                .isEqualTo(0);
+    }
+
+    @Test
+    public void testDexoptNotAffectedByPreRebootArtifacts() throws Exception {
+        // Same setup as above, but `isPreReboot` is false.
+        lenient()
+                .when(mArtd.getArtifactsVisibility(
+                        deepEq(AidlUtils.buildArtifactsPathAsInputPreReboot(
+                                mDexPath, "arm", false /* isInDalvikCache */))))
+                .thenReturn(FileVisibility.OTHER_READABLE);
+
+        mPrimaryDexopter =
+                new PrimaryDexopter(mInjector, mPkgState, mPkg, mDexoptParams, mCancellationSignal);
+
+        List<DexContainerFileDexoptResult> results = mPrimaryDexopter.dexopt();
+        assertThat(results).hasSize(4);
+        for (DexContainerFileDexoptResult result : results) {
+            assertThat(result.getStatus()).isEqualTo(DexoptResult.DEXOPT_PERFORMED);
+        }
     }
 
     private void checkDexoptWithProfile(IArtd artd, String dexPath, String isa, ProfilePath profile,

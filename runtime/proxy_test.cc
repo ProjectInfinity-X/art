@@ -18,7 +18,7 @@
 #include <vector>
 
 #include "art_field-inl.h"
-#include "base/enums.h"
+#include "base/pointer_size.h"
 #include "common_runtime_test.h"
 #include "mirror/field.h"
 #include "proxy_test.h"
@@ -114,6 +114,7 @@ TEST_F(ProxyTest, ProxyFieldHelper) {
   ArtField* field = &static_fields->At(0);
   EXPECT_STREQ("interfaces", field->GetName());
   EXPECT_STREQ("[Ljava/lang/Class;", field->GetTypeDescriptor());
+  EXPECT_EQ("[Ljava/lang/Class;", field->GetTypeDescriptorView());
   EXPECT_OBJ_PTR_EQ(interfacesFieldClass.Get(), field->ResolveType());
   std::string temp;
   EXPECT_STREQ("L$Proxy1234;", field->GetDeclaringClass()->GetDescriptor(&temp));
@@ -123,6 +124,7 @@ TEST_F(ProxyTest, ProxyFieldHelper) {
   field = &static_fields->At(1);
   EXPECT_STREQ("throws", field->GetName());
   EXPECT_STREQ("[[Ljava/lang/Class;", field->GetTypeDescriptor());
+  EXPECT_EQ("[[Ljava/lang/Class;", field->GetTypeDescriptorView());
   EXPECT_OBJ_PTR_EQ(throwsFieldClass.Get(), field->ResolveType());
   EXPECT_STREQ("L$Proxy1234;", field->GetDeclaringClass()->GetDescriptor(&temp));
   EXPECT_FALSE(field->IsPrimitiveType());

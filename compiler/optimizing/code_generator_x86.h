@@ -18,8 +18,8 @@
 #define ART_COMPILER_OPTIMIZING_CODE_GENERATOR_X86_H_
 
 #include "arch/x86/instruction_set_features_x86.h"
-#include "base/enums.h"
 #include "base/macros.h"
+#include "base/pointer_size.h"
 #include "code_generator.h"
 #include "dex/dex_file_types.h"
 #include "driver/compiler_options.h"
@@ -49,12 +49,18 @@ static constexpr size_t kRuntimeParameterFpuRegistersLength =
     arraysize(kRuntimeParameterFpuRegisters);
 
 #define UNIMPLEMENTED_INTRINSIC_LIST_X86(V) \
+  V(MathSignumFloat)                        \
+  V(MathSignumDouble)                       \
+  V(MathCopySignFloat)                      \
+  V(MathCopySignDouble)                     \
   V(MathRoundDouble)                        \
   V(FloatIsInfinite)                        \
   V(DoubleIsInfinite)                       \
   V(IntegerHighestOneBit)                   \
   V(LongHighestOneBit)                      \
   V(LongDivideUnsigned)                     \
+  V(IntegerRemainderUnsigned)               \
+  V(LongRemainderUnsigned)                  \
   V(CRC32Update)                            \
   V(CRC32UpdateBytes)                       \
   V(CRC32UpdateByteBuffer)                  \
@@ -88,9 +94,12 @@ static constexpr size_t kRuntimeParameterFpuRegistersLength =
   V(StringBuilderAppendDouble)              \
   V(StringBuilderLength)                    \
   V(StringBuilderToString)                  \
+  V(UnsafeArrayBaseOffset)                  \
   /* 1.8 */                                 \
   V(MethodHandleInvokeExact)                \
-  V(MethodHandleInvoke)
+  V(MethodHandleInvoke)                     \
+  /* OpenJDK 11 */                          \
+  V(JdkUnsafeArrayBaseOffset)
 
 class InvokeRuntimeCallingConvention : public CallingConvention<Register, XmmRegister> {
  public:
@@ -240,6 +249,7 @@ class LocationsBuilderX86 : public HGraphVisitor {
   void HandleBitwiseOperation(HBinaryOperation* instruction);
   void HandleInvoke(HInvoke* invoke);
   void HandleCondition(HCondition* condition);
+  void HandleRotate(HBinaryOperation* rotate);
   void HandleShift(HBinaryOperation* instruction);
   void HandleFieldSet(HInstruction* instruction,
                       const FieldInfo& field_info,
@@ -330,6 +340,7 @@ class InstructionCodeGeneratorX86 : public InstructionCodeGenerator {
                       bool value_can_be_null,
                       WriteBarrierKind write_barrier_kind);
   void HandleFieldGet(HInstruction* instruction, const FieldInfo& field_info);
+  void HandleRotate(HBinaryOperation* rotate);
 
   // Generate a heap reference load using one register `out`:
   //
@@ -539,6 +550,7 @@ class CodeGeneratorX86 : public CodeGenerator {
   void RecordBootImageMethodPatch(HInvoke* invoke);
   void RecordMethodBssEntryPatch(HInvoke* invoke);
   void RecordBootImageTypePatch(HLoadClass* load_class);
+  void RecordAppImageTypePatch(HLoadClass* load_class);
   Label* NewTypeBssEntryPatch(HLoadClass* load_class);
   void RecordBootImageStringPatch(HLoadString* load_string);
   Label* NewStringBssEntryPatch(HLoadString* load_string);
@@ -775,6 +787,8 @@ class CodeGeneratorX86 : public CodeGenerator {
   ArenaDeque<X86PcRelativePatchInfo> method_bss_entry_patches_;
   // PC-relative type patch info for kBootImageLinkTimePcRelative.
   ArenaDeque<X86PcRelativePatchInfo> boot_image_type_patches_;
+  // PC-relative type patch info for kAppImageRelRo.
+  ArenaDeque<X86PcRelativePatchInfo> app_image_type_patches_;
   // PC-relative type patch info for kBssEntry.
   ArenaDeque<X86PcRelativePatchInfo> type_bss_entry_patches_;
   // PC-relative public type patch info for kBssEntryPublic.

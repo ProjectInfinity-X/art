@@ -261,6 +261,9 @@ template void Split(const std::string_view& s,
 template void Split(const std::string_view& s,
                     char separator,
                     std::vector<std::string>* out_result);
+template void Split(const std::string& s,
+                    char separator,
+                    std::vector<std::string_view>* out_result);
 
 template <typename Str>
 void Split(const Str& s, char separator, size_t len, Str* out_result) {
@@ -283,7 +286,7 @@ template void Split(const std::string_view& s,
                     size_t len,
                     std::string_view* out_result);
 
-void SetThreadName(const char* thread_name) {
+void SetThreadName(pthread_t thr, const char* thread_name) {
   bool hasAt = false;
   bool hasDot = false;
   const char* s = thread_name;
@@ -306,14 +309,20 @@ void SetThreadName(const char* thread_name) {
   char buf[16];       // MAX_TASK_COMM_LEN=16 is hard-coded in the kernel.
   strncpy(buf, s, sizeof(buf)-1);
   buf[sizeof(buf)-1] = '\0';
-  errno = pthread_setname_np(pthread_self(), buf);
+  errno = pthread_setname_np(thr, buf);
   if (errno != 0) {
     PLOG(WARNING) << "Unable to set the name of current thread to '" << buf << "'";
   }
 #else  // __APPLE__
-  pthread_setname_np(thread_name);
+  if (pthread_equal(thr, pthread_self())) {
+    pthread_setname_np(thread_name);
+  } else {
+    PLOG(WARNING) << "Unable to set the name of another thread to '" << thread_name << "'";
+  }
 #endif
 }
+
+void SetThreadName(const char* thread_name) { SetThreadName(pthread_self(), thread_name); }
 
 void GetTaskStats(pid_t tid, char* state, int* utime, int* stime, int* task_cpu) {
   *utime = *stime = *task_cpu = 0;
@@ -366,45 +375,79 @@ std::string GetProcessStatus(const char* key) {
   return "<unknown>";
 }
 
-bool IsAddressKnownBackedByFileOrShared(const void* addr) {
-  // We use the Linux pagemap interface for knowing if an address is backed
-  // by a file or is shared. See:
-  // https://www.kernel.org/doc/Documentation/vm/pagemap.txt
-  const size_t page_size = MemMap::GetPageSize();
-  uintptr_t vmstart = reinterpret_cast<uintptr_t>(AlignDown(addr, page_size));
-  off_t index = (vmstart / page_size) * sizeof(uint64_t);
-  android::base::unique_fd pagemap(open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC));
-  if (pagemap == -1) {
-    return false;
+size_t GetOsThreadStat(pid_t tid, char* buf, size_t len) {
+#if defined(__linux__)
+  static constexpr int NAME_BUF_SIZE = 60;
+  char file_name_buf[NAME_BUF_SIZE];
+  // We don't use just /proc/<pid>/stat since, in spite of some documentation to the contrary,
+  // those report utime and stime values for the whole process, not just the thread.
+  snprintf(file_name_buf, NAME_BUF_SIZE, "/proc/%d/task/%d/stat", getpid(), tid);
+  int stat_fd = open(file_name_buf, O_RDONLY | O_CLOEXEC);
+  if (stat_fd >= 0) {
+    ssize_t bytes_read = TEMP_FAILURE_RETRY(read(stat_fd, buf, len));
+    CHECK_GT(bytes_read, 0) << strerror(errno);
+    int ret = close(stat_fd);
+    CHECK_EQ(ret, 0) << strerror(errno);
+    buf[len - 1] = '\0';
+    return bytes_read;
   }
-  if (lseek(pagemap, index, SEEK_SET) != index) {
-    return false;
-  }
-  uint64_t flags;
-  if (read(pagemap, &flags, sizeof(uint64_t)) != sizeof(uint64_t)) {
-    return false;
-  }
-  // From https://www.kernel.org/doc/Documentation/vm/pagemap.txt:
-  //  * Bit  61    page is file-page or shared-anon (since 3.5)
-  return (flags & (1LL << 61)) != 0;
+#else
+  UNUSED(tid);
+  UNUSED(buf);
+  UNUSED(len);
+#endif
+  return 0;
 }
 
-int GetTaskCount() {
-  DIR* directory = opendir("/proc/self/task");
-  if (directory == nullptr) {
-    return -1;
+std::string GetOsThreadStatQuick(pid_t tid) {
+  static constexpr int BUF_SIZE = 100;
+  char buf[BUF_SIZE];
+#if defined(__linux__)
+  if (GetOsThreadStat(tid, buf, BUF_SIZE) == 0) {
+    snprintf(buf, BUF_SIZE, "Unknown state: %d", tid);
   }
+#else
+  UNUSED(tid);
+  strcpy(buf, "Unknown state");  // snprintf may not be usable.
+#endif
+  return buf;
+}
 
-  uint32_t count = 0;
-  struct dirent* entry = nullptr;
-  while ((entry = readdir(directory)) != nullptr) {
-    if ((strcmp(entry->d_name, ".") == 0) || (strcmp(entry->d_name, "..") == 0)) {
+std::string GetOtherThreadOsStats() {
+#if defined(__linux__)
+  DIR* dir = opendir("/proc/self/task");
+  if (dir == nullptr) {
+    return std::string("Failed to open /proc/self/task: ") + strerror(errno);
+  }
+  pid_t me = GetTid();
+  struct dirent* de;
+  std::string result;
+  bool found_me = false;
+  errno = 0;
+  while ((de = readdir(dir)) != nullptr) {
+    if (de->d_name[0] == '.') {
       continue;
     }
-    ++count;
+    pid_t tid = atoi(de->d_name);
+    if (tid == me) {
+      found_me = true;
+    } else {
+      if (!result.empty()) {
+        result += "; ";
+      }
+      result += tid == 0 ? std::string("bad tid: ") + de->d_name : GetOsThreadStatQuick(tid);
+    }
   }
-  closedir(directory);
-  return count;
+  if (errno == EBADF) {
+    result += "(Bad directory)";
+  }
+  if (!found_me) {
+    result += "(Failed to find requestor)";
+  }
+  return result;
+#else
+  return "Can't get other threads";
+#endif
 }
 
 }  // namespace art

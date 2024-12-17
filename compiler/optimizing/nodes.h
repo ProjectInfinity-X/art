@@ -58,6 +58,7 @@ class ArenaStack;
 class CodeGenerator;
 class GraphChecker;
 class HBasicBlock;
+class HCondition;
 class HConstructorFence;
 class HCurrentMethod;
 class HDoubleConstant;
@@ -142,6 +143,8 @@ enum GraphAnalysisResult {
   kAnalysisFailPhiEquivalentInOsr,
   kAnalysisSuccess,
 };
+
+std::ostream& operator<<(std::ostream& os, GraphAnalysisResult ga);
 
 template <typename T>
 static inline typename std::make_unsigned<T>::type MakeUnsigned(T x) {
@@ -730,10 +733,10 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
   void SetProfilingInfo(ProfilingInfo* info) { profiling_info_ = info; }
   ProfilingInfo* GetProfilingInfo() const { return profiling_info_; }
 
-  // Returns an instruction with the opposite Boolean value from 'cond'.
-  // The instruction has been inserted into the graph, either as a constant, or
-  // before cursor.
-  HInstruction* InsertOppositeCondition(HInstruction* cond, HInstruction* cursor);
+  HCondition* CreateCondition(IfCondition cond,
+                              HInstruction* lhs,
+                              HInstruction* rhs,
+                              uint32_t dex_pc = kNoDexPc);
 
   ReferenceTypeInfo GetInexactObjectRti() {
     return ReferenceTypeInfo::Create(handle_cache_.GetObjectClassHandle(), /* is_exact= */ false);
@@ -1525,6 +1528,7 @@ class HLoopInformationOutwardIterator : public ValueObject {
   M(ArraySet, Instruction)                                              \
   M(Below, Condition)                                                   \
   M(BelowOrEqual, Condition)                                            \
+  M(BitwiseNegatedRight, BinaryOperation)                               \
   M(BooleanNot, UnaryOperation)                                         \
   M(BoundsCheck, Instruction)                                           \
   M(BoundType, Instruction)                                             \
@@ -1589,6 +1593,7 @@ class HLoopInformationOutwardIterator : public ValueObject {
   M(Rem, BinaryOperation)                                               \
   M(Return, Instruction)                                                \
   M(ReturnVoid, Instruction)                                            \
+  M(Rol, BinaryOperation)                                               \
   M(Ror, BinaryOperation)                                               \
   M(Shl, BinaryOperation)                                               \
   M(Shr, BinaryOperation)                                               \
@@ -1655,7 +1660,6 @@ class HLoopInformationOutwardIterator : public ValueObject {
 #define FOR_EACH_CONCRETE_INSTRUCTION_SHARED(M)
 #else
 #define FOR_EACH_CONCRETE_INSTRUCTION_SHARED(M)                         \
-  M(BitwiseNegatedRight, Instruction)                                   \
   M(DataProcWithShifterOp, Instruction)                                 \
   M(MultiplyAccumulate, Instruction)                                    \
   M(IntermediateAddressIndex, Instruction)
@@ -1665,7 +1669,11 @@ class HLoopInformationOutwardIterator : public ValueObject {
 
 #define FOR_EACH_CONCRETE_INSTRUCTION_ARM64(M)
 
+#if defined(ART_ENABLE_CODEGEN_riscv64)
+#define FOR_EACH_CONCRETE_INSTRUCTION_RISCV64(M) M(Riscv64ShiftAdd, Instruction)
+#else
 #define FOR_EACH_CONCRETE_INSTRUCTION_RISCV64(M)
+#endif
 
 #ifndef ART_ENABLE_CODEGEN_x86
 #define FOR_EACH_CONCRETE_INSTRUCTION_X86(M)
@@ -1692,6 +1700,7 @@ class HLoopInformationOutwardIterator : public ValueObject {
   FOR_EACH_CONCRETE_INSTRUCTION_SHARED(M)                               \
   FOR_EACH_CONCRETE_INSTRUCTION_ARM(M)                                  \
   FOR_EACH_CONCRETE_INSTRUCTION_ARM64(M)                                \
+  FOR_EACH_CONCRETE_INSTRUCTION_RISCV64(M)                              \
   FOR_EACH_CONCRETE_INSTRUCTION_X86(M)                                  \
   FOR_EACH_CONCRETE_INSTRUCTION_X86_64(M)                               \
   FOR_EACH_CONCRETE_INSTRUCTION_X86_COMMON(M)
@@ -3883,10 +3892,22 @@ class HUnaryOperation : public HExpression<1> {
   HConstant* TryStaticEvaluation(HInstruction* input) const;
 
   // Apply this operation to `x`.
-  virtual HConstant* Evaluate(HIntConstant* x) const = 0;
-  virtual HConstant* Evaluate(HLongConstant* x) const = 0;
-  virtual HConstant* Evaluate(HFloatConstant* x) const = 0;
-  virtual HConstant* Evaluate(HDoubleConstant* x) const = 0;
+  virtual HConstant* Evaluate([[maybe_unused]] HIntConstant* x) const {
+    LOG(FATAL) << DebugName() << " is not defined for int values";
+    UNREACHABLE();
+  }
+  virtual HConstant* Evaluate([[maybe_unused]] HLongConstant* x) const {
+    LOG(FATAL) << DebugName() << " is not defined for long values";
+    UNREACHABLE();
+  }
+  virtual HConstant* Evaluate([[maybe_unused]] HFloatConstant* x) const {
+    LOG(FATAL) << DebugName() << " is not defined for float values";
+    UNREACHABLE();
+  }
+  virtual HConstant* Evaluate([[maybe_unused]] HDoubleConstant* x) const {
+    LOG(FATAL) << DebugName() << " is not defined for double values";
+    UNREACHABLE();
+  }
 
   DECLARE_ABSTRACT_INSTRUCTION(UnaryOperation);
 
@@ -3967,15 +3988,31 @@ class HBinaryOperation : public HExpression<2> {
     LOG(FATAL) << DebugName() << " is not defined for the (null, null) case.";
     UNREACHABLE();
   }
-  virtual HConstant* Evaluate(HIntConstant* x, HIntConstant* y) const = 0;
-  virtual HConstant* Evaluate(HLongConstant* x, HLongConstant* y) const = 0;
+  virtual HConstant* Evaluate([[maybe_unused]] HIntConstant* x,
+                              [[maybe_unused]] HIntConstant* y) const {
+    LOG(FATAL) << DebugName() << " is not defined for the (int, int) case.";
+    UNREACHABLE();
+  }
+  virtual HConstant* Evaluate([[maybe_unused]] HLongConstant* x,
+                              [[maybe_unused]] HLongConstant* y) const {
+    LOG(FATAL) << DebugName() << " is not defined for the (long, long) case.";
+    UNREACHABLE();
+  }
   virtual HConstant* Evaluate([[maybe_unused]] HLongConstant* x,
                               [[maybe_unused]] HIntConstant* y) const {
     LOG(FATAL) << DebugName() << " is not defined for the (long, int) case.";
     UNREACHABLE();
   }
-  virtual HConstant* Evaluate(HFloatConstant* x, HFloatConstant* y) const = 0;
-  virtual HConstant* Evaluate(HDoubleConstant* x, HDoubleConstant* y) const = 0;
+  virtual HConstant* Evaluate([[maybe_unused]] HFloatConstant* x,
+                              [[maybe_unused]] HFloatConstant* y) const {
+    LOG(FATAL) << DebugName() << " is not defined for float values";
+    UNREACHABLE();
+  }
+  virtual HConstant* Evaluate([[maybe_unused]] HDoubleConstant* x,
+                              [[maybe_unused]] HDoubleConstant* y) const {
+    LOG(FATAL) << DebugName() << " is not defined for double values";
+    UNREACHABLE();
+  }
 
   // Returns an input that can legally be used as the right input and is
   // constant, or null.
@@ -4352,16 +4389,6 @@ class HBelow final : public HCondition {
   HConstant* Evaluate(HLongConstant* x, HLongConstant* y) const override {
     return MakeConstantCondition(Compute(x->GetValue(), y->GetValue()), GetDexPc());
   }
-  HConstant* Evaluate([[maybe_unused]] HFloatConstant* x,
-                      [[maybe_unused]] HFloatConstant* y) const override {
-    LOG(FATAL) << DebugName() << " is not defined for float values";
-    UNREACHABLE();
-  }
-  HConstant* Evaluate([[maybe_unused]] HDoubleConstant* x,
-                      [[maybe_unused]] HDoubleConstant* y) const override {
-    LOG(FATAL) << DebugName() << " is not defined for double values";
-    UNREACHABLE();
-  }
 
   DECLARE_INSTRUCTION(Below);
 
@@ -4393,16 +4420,6 @@ class HBelowOrEqual final : public HCondition {
   }
   HConstant* Evaluate(HLongConstant* x, HLongConstant* y) const override {
     return MakeConstantCondition(Compute(x->GetValue(), y->GetValue()), GetDexPc());
-  }
-  HConstant* Evaluate([[maybe_unused]] HFloatConstant* x,
-                      [[maybe_unused]] HFloatConstant* y) const override {
-    LOG(FATAL) << DebugName() << " is not defined for float values";
-    UNREACHABLE();
-  }
-  HConstant* Evaluate([[maybe_unused]] HDoubleConstant* x,
-                      [[maybe_unused]] HDoubleConstant* y) const override {
-    LOG(FATAL) << DebugName() << " is not defined for double values";
-    UNREACHABLE();
   }
 
   DECLARE_INSTRUCTION(BelowOrEqual);
@@ -4436,16 +4453,6 @@ class HAbove final : public HCondition {
   HConstant* Evaluate(HLongConstant* x, HLongConstant* y) const override {
     return MakeConstantCondition(Compute(x->GetValue(), y->GetValue()), GetDexPc());
   }
-  HConstant* Evaluate([[maybe_unused]] HFloatConstant* x,
-                      [[maybe_unused]] HFloatConstant* y) const override {
-    LOG(FATAL) << DebugName() << " is not defined for float values";
-    UNREACHABLE();
-  }
-  HConstant* Evaluate([[maybe_unused]] HDoubleConstant* x,
-                      [[maybe_unused]] HDoubleConstant* y) const override {
-    LOG(FATAL) << DebugName() << " is not defined for double values";
-    UNREACHABLE();
-  }
 
   DECLARE_INSTRUCTION(Above);
 
@@ -4477,16 +4484,6 @@ class HAboveOrEqual final : public HCondition {
   }
   HConstant* Evaluate(HLongConstant* x, HLongConstant* y) const override {
     return MakeConstantCondition(Compute(x->GetValue(), y->GetValue()), GetDexPc());
-  }
-  HConstant* Evaluate([[maybe_unused]] HFloatConstant* x,
-                      [[maybe_unused]] HFloatConstant* y) const override {
-    LOG(FATAL) << DebugName() << " is not defined for float values";
-    UNREACHABLE();
-  }
-  HConstant* Evaluate([[maybe_unused]] HDoubleConstant* x,
-                      [[maybe_unused]] HDoubleConstant* y) const override {
-    LOG(FATAL) << DebugName() << " is not defined for double values";
-    UNREACHABLE();
   }
 
   DECLARE_INSTRUCTION(AboveOrEqual);
@@ -4527,6 +4524,7 @@ class HCompare final : public HBinaryOperation {
                          SideEffectsForArchRuntimeCalls(comparison_type),
                          dex_pc) {
     SetPackedField<ComparisonBiasField>(bias);
+    SetPackedField<ComparisonTypeField>(comparison_type);
   }
 
   template <typename T>
@@ -4546,10 +4544,16 @@ class HCompare final : public HBinaryOperation {
     // graph. However HCompare integer instructions can be synthesized
     // by the instruction simplifier to implement IntegerCompare and
     // IntegerSignum intrinsics, so we have to handle this case.
-    return MakeConstantComparison(Compute(x->GetValue(), y->GetValue()), GetDexPc());
+    const int32_t value = DataType::IsUnsignedType(GetComparisonType()) ?
+        Compute(x->GetValueAsUint64(), y->GetValueAsUint64()) :
+        Compute(x->GetValue(), y->GetValue());
+    return MakeConstantComparison(value, GetDexPc());
   }
   HConstant* Evaluate(HLongConstant* x, HLongConstant* y) const override {
-    return MakeConstantComparison(Compute(x->GetValue(), y->GetValue()), GetDexPc());
+    const int32_t value = DataType::IsUnsignedType(GetComparisonType()) ?
+        Compute(x->GetValueAsUint64(), y->GetValueAsUint64()) :
+        Compute(x->GetValue(), y->GetValue());
+    return MakeConstantComparison(value, GetDexPc());
   }
   HConstant* Evaluate(HFloatConstant* x, HFloatConstant* y) const override {
     return MakeConstantComparison(ComputeFP(x->GetValue(), y->GetValue()), GetDexPc());
@@ -4563,6 +4567,10 @@ class HCompare final : public HBinaryOperation {
   }
 
   ComparisonBias GetBias() const { return GetPackedField<ComparisonBiasField>(); }
+
+  DataType::Type GetComparisonType() const { return GetPackedField<ComparisonTypeField>(); }
+
+  void SetComparisonType(DataType::Type newType) { SetPackedField<ComparisonTypeField>(newType); }
 
   // Does this compare instruction have a "gt bias" (vs an "lt bias")?
   // Only meaningful for floating-point comparisons.
@@ -4582,11 +4590,16 @@ class HCompare final : public HBinaryOperation {
   static constexpr size_t kFieldComparisonBias = kNumberOfGenericPackedBits;
   static constexpr size_t kFieldComparisonBiasSize =
       MinimumBitsToStore(static_cast<size_t>(ComparisonBias::kLast));
+  static constexpr size_t kFieldComparisonType = kFieldComparisonBias + kFieldComparisonBiasSize;
+  static constexpr size_t kFieldComparisonTypeSize =
+      MinimumBitsToStore(static_cast<size_t>(DataType::Type::kLast));
   static constexpr size_t kNumberOfComparePackedBits =
-      kFieldComparisonBias + kFieldComparisonBiasSize;
+      kFieldComparisonType + kFieldComparisonTypeSize;
   static_assert(kNumberOfComparePackedBits <= kMaxNumberOfPackedBits, "Too many packed fields.");
   using ComparisonBiasField =
       BitField<ComparisonBias, kFieldComparisonBias, kFieldComparisonBiasSize>;
+  using ComparisonTypeField =
+      BitField<DataType::Type, kFieldComparisonType, kFieldComparisonTypeSize>;
 
   // Return an integer constant containing the result of a comparison evaluated at compile time.
   HIntConstant* MakeConstantComparison(int32_t value, uint32_t dex_pc) const {
@@ -4710,7 +4723,7 @@ enum class MethodLoadKind {
   // Used for boot image methods referenced by boot image code.
   kBootImageLinkTimePcRelative,
 
-  // Load from an entry in the .data.bimg.rel.ro using a PC-relative load.
+  // Load from a boot image entry in the .data.img.rel.ro using a PC-relative load.
   // Used for app->boot calls with relocatable image.
   kBootImageRelRo,
 
@@ -4900,6 +4913,7 @@ class HInvokePolymorphic final : public HInvoke {
  public:
   HInvokePolymorphic(ArenaAllocator* allocator,
                      uint32_t number_of_arguments,
+                     uint32_t number_of_other_inputs,
                      DataType::Type return_type,
                      uint32_t dex_pc,
                      MethodReference method_reference,
@@ -4912,7 +4926,7 @@ class HInvokePolymorphic final : public HInvoke {
       : HInvoke(kInvokePolymorphic,
                 allocator,
                 number_of_arguments,
-                /* number_of_other_inputs= */ 0u,
+                number_of_other_inputs,
                 return_type,
                 dex_pc,
                 method_reference,
@@ -4925,6 +4939,13 @@ class HInvokePolymorphic final : public HInvoke {
   bool IsClonable() const override { return true; }
 
   dex::ProtoIndex GetProtoIndex() { return proto_idx_; }
+
+  // Whether we can do direct invocation of the method handle.
+  bool CanHaveFastPath() const {
+    return GetIntrinsic() == Intrinsics::kMethodHandleInvokeExact &&
+        GetNumberOfArguments() >= 2 &&
+        InputAt(1)->GetType() == DataType::Type::kReference;
+  }
 
   DECLARE_INSTRUCTION(InvokePolymorphic);
 
@@ -5789,21 +5810,6 @@ class HShl final : public HBinaryOperation {
     return GetBlock()->GetGraph()->GetLongConstant(
         Compute(value->GetValue(), distance->GetValue(), kMaxLongShiftDistance), GetDexPc());
   }
-  HConstant* Evaluate([[maybe_unused]] HLongConstant* value,
-                      [[maybe_unused]] HLongConstant* distance) const override {
-    LOG(FATAL) << DebugName() << " is not defined for the (long, long) case.";
-    UNREACHABLE();
-  }
-  HConstant* Evaluate([[maybe_unused]] HFloatConstant* value,
-                      [[maybe_unused]] HFloatConstant* distance) const override {
-    LOG(FATAL) << DebugName() << " is not defined for float values";
-    UNREACHABLE();
-  }
-  HConstant* Evaluate([[maybe_unused]] HDoubleConstant* value,
-                      [[maybe_unused]] HDoubleConstant* distance) const override {
-    LOG(FATAL) << DebugName() << " is not defined for double values";
-    UNREACHABLE();
-  }
 
   DECLARE_INSTRUCTION(Shl);
 
@@ -5834,21 +5840,6 @@ class HShr final : public HBinaryOperation {
   HConstant* Evaluate(HLongConstant* value, HIntConstant* distance) const override {
     return GetBlock()->GetGraph()->GetLongConstant(
         Compute(value->GetValue(), distance->GetValue(), kMaxLongShiftDistance), GetDexPc());
-  }
-  HConstant* Evaluate([[maybe_unused]] HLongConstant* value,
-                      [[maybe_unused]] HLongConstant* distance) const override {
-    LOG(FATAL) << DebugName() << " is not defined for the (long, long) case.";
-    UNREACHABLE();
-  }
-  HConstant* Evaluate([[maybe_unused]] HFloatConstant* value,
-                      [[maybe_unused]] HFloatConstant* distance) const override {
-    LOG(FATAL) << DebugName() << " is not defined for float values";
-    UNREACHABLE();
-  }
-  HConstant* Evaluate([[maybe_unused]] HDoubleConstant* value,
-                      [[maybe_unused]] HDoubleConstant* distance) const override {
-    LOG(FATAL) << DebugName() << " is not defined for double values";
-    UNREACHABLE();
   }
 
   DECLARE_INSTRUCTION(Shr);
@@ -5883,21 +5874,6 @@ class HUShr final : public HBinaryOperation {
     return GetBlock()->GetGraph()->GetLongConstant(
         Compute(value->GetValue(), distance->GetValue(), kMaxLongShiftDistance), GetDexPc());
   }
-  HConstant* Evaluate([[maybe_unused]] HLongConstant* value,
-                      [[maybe_unused]] HLongConstant* distance) const override {
-    LOG(FATAL) << DebugName() << " is not defined for the (long, long) case.";
-    UNREACHABLE();
-  }
-  HConstant* Evaluate([[maybe_unused]] HFloatConstant* value,
-                      [[maybe_unused]] HFloatConstant* distance) const override {
-    LOG(FATAL) << DebugName() << " is not defined for float values";
-    UNREACHABLE();
-  }
-  HConstant* Evaluate([[maybe_unused]] HDoubleConstant* value,
-                      [[maybe_unused]] HDoubleConstant* distance) const override {
-    LOG(FATAL) << DebugName() << " is not defined for double values";
-    UNREACHABLE();
-  }
 
   DECLARE_INSTRUCTION(UShr);
 
@@ -5925,16 +5901,6 @@ class HAnd final : public HBinaryOperation {
   HConstant* Evaluate(HLongConstant* x, HLongConstant* y) const override {
     return GetBlock()->GetGraph()->GetLongConstant(
         Compute(x->GetValue(), y->GetValue()), GetDexPc());
-  }
-  HConstant* Evaluate([[maybe_unused]] HFloatConstant* x,
-                      [[maybe_unused]] HFloatConstant* y) const override {
-    LOG(FATAL) << DebugName() << " is not defined for float values";
-    UNREACHABLE();
-  }
-  HConstant* Evaluate([[maybe_unused]] HDoubleConstant* x,
-                      [[maybe_unused]] HDoubleConstant* y) const override {
-    LOG(FATAL) << DebugName() << " is not defined for double values";
-    UNREACHABLE();
   }
 
   DECLARE_INSTRUCTION(And);
@@ -5964,16 +5930,6 @@ class HOr final : public HBinaryOperation {
     return GetBlock()->GetGraph()->GetLongConstant(
         Compute(x->GetValue(), y->GetValue()), GetDexPc());
   }
-  HConstant* Evaluate([[maybe_unused]] HFloatConstant* x,
-                      [[maybe_unused]] HFloatConstant* y) const override {
-    LOG(FATAL) << DebugName() << " is not defined for float values";
-    UNREACHABLE();
-  }
-  HConstant* Evaluate([[maybe_unused]] HDoubleConstant* x,
-                      [[maybe_unused]] HDoubleConstant* y) const override {
-    LOG(FATAL) << DebugName() << " is not defined for double values";
-    UNREACHABLE();
-  }
 
   DECLARE_INSTRUCTION(Or);
 
@@ -6001,16 +5957,6 @@ class HXor final : public HBinaryOperation {
   HConstant* Evaluate(HLongConstant* x, HLongConstant* y) const override {
     return GetBlock()->GetGraph()->GetLongConstant(
         Compute(x->GetValue(), y->GetValue()), GetDexPc());
-  }
-  HConstant* Evaluate([[maybe_unused]] HFloatConstant* x,
-                      [[maybe_unused]] HFloatConstant* y) const override {
-    LOG(FATAL) << DebugName() << " is not defined for float values";
-    UNREACHABLE();
-  }
-  HConstant* Evaluate([[maybe_unused]] HDoubleConstant* x,
-                      [[maybe_unused]] HDoubleConstant* y) const override {
-    LOG(FATAL) << DebugName() << " is not defined for double values";
-    UNREACHABLE();
   }
 
   DECLARE_INSTRUCTION(Xor);
@@ -6046,26 +5992,36 @@ class HRor final : public HBinaryOperation {
     return GetBlock()->GetGraph()->GetLongConstant(
         Compute(value->GetValue(), distance->GetValue(), kMaxLongShiftDistance), GetDexPc());
   }
-  HConstant* Evaluate([[maybe_unused]] HLongConstant* value,
-                      [[maybe_unused]] HLongConstant* distance) const override {
-    LOG(FATAL) << DebugName() << " is not defined for the (long, long) case.";
-    UNREACHABLE();
-  }
-  HConstant* Evaluate([[maybe_unused]] HFloatConstant* value,
-                      [[maybe_unused]] HFloatConstant* distance) const override {
-    LOG(FATAL) << DebugName() << " is not defined for float values";
-    UNREACHABLE();
-  }
-  HConstant* Evaluate([[maybe_unused]] HDoubleConstant* value,
-                      [[maybe_unused]] HDoubleConstant* distance) const override {
-    LOG(FATAL) << DebugName() << " is not defined for double values";
-    UNREACHABLE();
-  }
 
   DECLARE_INSTRUCTION(Ror);
 
  protected:
   DEFAULT_COPY_CONSTRUCTOR(Ror);
+};
+
+class HRol final : public HBinaryOperation {
+ public:
+  HRol(DataType::Type result_type, HInstruction* value, HInstruction* distance)
+      : HBinaryOperation(kRol, result_type, value, distance) {}
+
+  template <typename T>
+  static T Compute(T value, int32_t distance, int32_t max_shift_value) {
+    return HRor::Compute(value, -distance, max_shift_value);
+  }
+
+  HConstant* Evaluate(HIntConstant* value, HIntConstant* distance) const override {
+    return GetBlock()->GetGraph()->GetIntConstant(
+        Compute(value->GetValue(), distance->GetValue(), kMaxIntShiftDistance), GetDexPc());
+  }
+  HConstant* Evaluate(HLongConstant* value, HIntConstant* distance) const override {
+    return GetBlock()->GetGraph()->GetLongConstant(
+        Compute(value->GetValue(), distance->GetValue(), kMaxLongShiftDistance), GetDexPc());
+  }
+
+  DECLARE_INSTRUCTION(Rol);
+
+ protected:
+  DEFAULT_COPY_CONSTRUCTOR(Rol);
 };
 
 // The value of a parameter in this method. Its location depends on
@@ -6132,14 +6088,6 @@ class HNot final : public HUnaryOperation {
   HConstant* Evaluate(HLongConstant* x) const override {
     return GetBlock()->GetGraph()->GetLongConstant(Compute(x->GetValue()), GetDexPc());
   }
-  HConstant* Evaluate([[maybe_unused]] HFloatConstant* x) const override {
-    LOG(FATAL) << DebugName() << " is not defined for float values";
-    UNREACHABLE();
-  }
-  HConstant* Evaluate([[maybe_unused]] HDoubleConstant* x) const override {
-    LOG(FATAL) << DebugName() << " is not defined for double values";
-    UNREACHABLE();
-  }
 
   DECLARE_INSTRUCTION(Not);
 
@@ -6165,18 +6113,6 @@ class HBooleanNot final : public HUnaryOperation {
 
   HConstant* Evaluate(HIntConstant* x) const override {
     return GetBlock()->GetGraph()->GetIntConstant(Compute(x->GetValue()), GetDexPc());
-  }
-  HConstant* Evaluate([[maybe_unused]] HLongConstant* x) const override {
-    LOG(FATAL) << DebugName() << " is not defined for long values";
-    UNREACHABLE();
-  }
-  HConstant* Evaluate([[maybe_unused]] HFloatConstant* x) const override {
-    LOG(FATAL) << DebugName() << " is not defined for float values";
-    UNREACHABLE();
-  }
-  HConstant* Evaluate([[maybe_unused]] HDoubleConstant* x) const override {
-    LOG(FATAL) << DebugName() << " is not defined for double values";
-    UNREACHABLE();
   }
 
   DECLARE_INSTRUCTION(BooleanNot);
@@ -6316,7 +6252,7 @@ inline std::ostream& operator<<(std::ostream& os, const FieldInfo& a) {
 
 class HInstanceFieldGet final : public HExpression<1> {
  public:
-  HInstanceFieldGet(HInstruction* value,
+  HInstanceFieldGet(HInstruction* object,
                     ArtField* field,
                     DataType::Type field_type,
                     MemberOffset field_offset,
@@ -6336,7 +6272,7 @@ class HInstanceFieldGet final : public HExpression<1> {
                     field_idx,
                     declaring_class_def_index,
                     dex_file) {
-    SetRawInputAt(0, value);
+    SetRawInputAt(0, object);
   }
 
   bool IsClonable() const override { return true; }
@@ -6607,6 +6543,8 @@ class HArraySet final : public HExpression<3> {
     SetPackedFlag<kFlagNeedsTypeCheck>(false);
     // Clear the `CanTriggerGC` flag too as we can only trigger a GC when doing a type check.
     SetSideEffects(GetSideEffects().Exclusion(SideEffects::CanTriggerGC()));
+    // Clear the environment too as we can only throw if we need a type check.
+    RemoveEnvironment();
   }
 
   void ClearValueCanBeNull() {
@@ -6854,9 +6792,13 @@ class HLoadClass final : public HInstruction {
     // Used for boot image classes referenced by boot image code.
     kBootImageLinkTimePcRelative,
 
-    // Load from an entry in the .data.bimg.rel.ro using a PC-relative load.
+    // Load from a boot image entry in the .data.img.rel.ro using a PC-relative load.
     // Used for boot image classes referenced by apps in AOT-compiled code.
     kBootImageRelRo,
+
+    // Load from an app image entry in the .data.img.rel.ro using a PC-relative load.
+    // Used for app image classes referenced by apps in AOT-compiled code.
+    kAppImageRelRo,
 
     // Load from an entry in the .bss section using a PC-relative load.
     // Used for classes outside boot image referenced by AOT-compiled app and boot image code.
@@ -6913,7 +6855,7 @@ class HLoadClass final : public HInstruction {
     SetPackedField<LoadKindField>(
         is_referrers_class ? LoadKind::kReferrersClass : LoadKind::kRuntimeCall);
     SetPackedFlag<kFlagNeedsAccessCheck>(needs_access_check);
-    SetPackedFlag<kFlagIsInBootImage>(false);
+    SetPackedFlag<kFlagIsInImage>(false);
     SetPackedFlag<kFlagGenerateClInitCheck>(false);
     SetPackedFlag<kFlagValidLoadedClassRTI>(false);
   }
@@ -6929,6 +6871,7 @@ class HLoadClass final : public HInstruction {
   bool HasPcRelativeLoadKind() const {
     return GetLoadKind() == LoadKind::kBootImageLinkTimePcRelative ||
            GetLoadKind() == LoadKind::kBootImageRelRo ||
+           GetLoadKind() == LoadKind::kAppImageRelRo ||
            GetLoadKind() == LoadKind::kBssEntry ||
            GetLoadKind() == LoadKind::kBssEntryPublic ||
            GetLoadKind() == LoadKind::kBssEntryPackage;
@@ -6966,8 +6909,8 @@ class HLoadClass final : public HInstruction {
   bool CanThrow() const override {
     return NeedsAccessCheck() ||
            MustGenerateClinitCheck() ||
-           // If the class is in the boot image, the lookup in the runtime call cannot throw.
-           ((GetLoadKind() == LoadKind::kRuntimeCall || NeedsBss()) && !IsInBootImage());
+           // If the class is in the boot or app image, the lookup in the runtime call cannot throw.
+           ((GetLoadKind() == LoadKind::kRuntimeCall || NeedsBss()) && !IsInImage());
   }
 
   ReferenceTypeInfo GetLoadedClassRTI() {
@@ -6994,7 +6937,7 @@ class HLoadClass final : public HInstruction {
 
   bool IsReferrersClass() const { return GetLoadKind() == LoadKind::kReferrersClass; }
   bool NeedsAccessCheck() const { return GetPackedFlag<kFlagNeedsAccessCheck>(); }
-  bool IsInBootImage() const { return GetPackedFlag<kFlagIsInBootImage>(); }
+  bool IsInImage() const { return GetPackedFlag<kFlagIsInImage>(); }
   bool MustGenerateClinitCheck() const { return GetPackedFlag<kFlagGenerateClInitCheck>(); }
 
   bool MustResolveTypeOnSlowPath() const {
@@ -7009,8 +6952,8 @@ class HLoadClass final : public HInstruction {
     return must_resolve_type_on_slow_path;
   }
 
-  void MarkInBootImage() {
-    SetPackedFlag<kFlagIsInBootImage>(true);
+  void MarkInImage() {
+    SetPackedFlag<kFlagIsInImage>(true);
   }
 
   void AddSpecialInput(HInstruction* special_input);
@@ -7032,10 +6975,11 @@ class HLoadClass final : public HInstruction {
 
  private:
   static constexpr size_t kFlagNeedsAccessCheck    = kNumberOfGenericPackedBits;
-  static constexpr size_t kFlagIsInBootImage       = kFlagNeedsAccessCheck + 1;
+  // Whether the type is in an image (boot image or app image).
+  static constexpr size_t kFlagIsInImage           = kFlagNeedsAccessCheck + 1;
   // Whether this instruction must generate the initialization check.
   // Used for code generation.
-  static constexpr size_t kFlagGenerateClInitCheck = kFlagIsInBootImage + 1;
+  static constexpr size_t kFlagGenerateClInitCheck = kFlagIsInImage + 1;
   static constexpr size_t kFieldLoadKind           = kFlagGenerateClInitCheck + 1;
   static constexpr size_t kFieldLoadKindSize =
       MinimumBitsToStore(static_cast<size_t>(LoadKind::kLast));
@@ -7047,6 +6991,7 @@ class HLoadClass final : public HInstruction {
   static bool HasTypeReference(LoadKind load_kind) {
     return load_kind == LoadKind::kReferrersClass ||
         load_kind == LoadKind::kBootImageLinkTimePcRelative ||
+        load_kind == LoadKind::kAppImageRelRo ||
         load_kind == LoadKind::kBssEntry ||
         load_kind == LoadKind::kBssEntryPublic ||
         load_kind == LoadKind::kBssEntryPackage ||
@@ -7092,6 +7037,7 @@ inline void HLoadClass::AddSpecialInput(HInstruction* special_input) {
   // including literal pool loads, which are PC-relative too.
   DCHECK(GetLoadKind() == LoadKind::kBootImageLinkTimePcRelative ||
          GetLoadKind() == LoadKind::kBootImageRelRo ||
+         GetLoadKind() == LoadKind::kAppImageRelRo ||
          GetLoadKind() == LoadKind::kBssEntry ||
          GetLoadKind() == LoadKind::kBssEntryPublic ||
          GetLoadKind() == LoadKind::kBssEntryPackage ||
@@ -7109,7 +7055,7 @@ class HLoadString final : public HInstruction {
     // Used for boot image strings referenced by boot image code.
     kBootImageLinkTimePcRelative,
 
-    // Load from an entry in the .data.bimg.rel.ro using a PC-relative load.
+    // Load from a boot image entry in the .data.img.rel.ro using a PC-relative load.
     // Used for boot image strings referenced by apps in AOT-compiled code.
     kBootImageRelRo,
 
@@ -7323,6 +7269,8 @@ class HLoadMethodType final : public HInstruction {
   enum class LoadKind {
     // Load from an entry in the .bss section using a PC-relative load.
     kBssEntry,
+    // Load from the root table associated with the JIT compiled method.
+    kJitTableAddress,
     // Load using a single runtime call.
     kRuntimeCall,
 
@@ -7359,6 +7307,10 @@ class HLoadMethodType final : public HInstruction {
 
   dex::ProtoIndex GetProtoIndex() const { return proto_index_; }
 
+  Handle<mirror::MethodType> GetMethodType() const { return method_type_; }
+
+  void SetMethodType(Handle<mirror::MethodType> method_type) { method_type_ = method_type; }
+
   const DexFile& GetDexFile() const { return dex_file_; }
 
   static SideEffects SideEffectsForArchRuntimeCalls() {
@@ -7388,6 +7340,8 @@ class HLoadMethodType final : public HInstruction {
 
   const dex::ProtoIndex proto_index_;
   const DexFile& dex_file_;
+
+  Handle<mirror::MethodType> method_type_;
 };
 
 std::ostream& operator<<(std::ostream& os, HLoadMethodType::LoadKind rhs);
@@ -7398,6 +7352,7 @@ inline void HLoadMethodType::SetLoadKind(LoadKind load_kind) {
   DCHECK(GetBlock() == nullptr);
   DCHECK(GetEnvironment() == nullptr);
   DCHECK_EQ(GetLoadKind(), LoadKind::kRuntimeCall);
+  DCHECK_IMPLIES(GetLoadKind() == LoadKind::kJitTableAddress, GetMethodType() != nullptr);
   SetPackedField<LoadKindField>(load_kind);
 }
 
@@ -8494,6 +8449,63 @@ class HParallelMove final : public HExpression<0> {
   ArenaVector<MoveOperands> moves_;
 };
 
+class HBitwiseNegatedRight final : public HBinaryOperation {
+ public:
+  HBitwiseNegatedRight(DataType::Type result_type,
+                       InstructionKind op,
+                       HInstruction* left,
+                       HInstruction* right,
+                       uint32_t dex_pc = kNoDexPc)
+      : HBinaryOperation(
+            kBitwiseNegatedRight, result_type, left, right, SideEffects::None(), dex_pc),
+        op_kind_(op) {
+    DCHECK(op == HInstruction::kAnd || op == HInstruction::kOr || op == HInstruction::kXor) << op;
+  }
+
+  template <typename T, typename U>
+  auto Compute(T x, U y) const -> decltype(x & ~y) {
+    static_assert(std::is_same<decltype(x & ~y), decltype(x | ~y)>::value &&
+                      std::is_same<decltype(x & ~y), decltype(x ^ ~y)>::value,
+                  "Inconsistent negated bitwise types");
+    switch (op_kind_) {
+      case HInstruction::kAnd:
+        return x & ~y;
+      case HInstruction::kOr:
+        return x | ~y;
+      case HInstruction::kXor:
+        return x ^ ~y;
+      default:
+        LOG(FATAL) << "Unreachable";
+        UNREACHABLE();
+    }
+  }
+
+  bool InstructionDataEquals(const HInstruction* other) const override {
+    return op_kind_ == other->AsBitwiseNegatedRight()->op_kind_;
+  }
+
+  HConstant* Evaluate(HIntConstant* x, HIntConstant* y) const override {
+    return GetBlock()->GetGraph()->GetIntConstant(Compute(x->GetValue(), y->GetValue()),
+                                                  GetDexPc());
+  }
+
+  HConstant* Evaluate(HLongConstant* x, HLongConstant* y) const override {
+    return GetBlock()->GetGraph()->GetLongConstant(Compute(x->GetValue(), y->GetValue()),
+                                                   GetDexPc());
+  }
+
+  InstructionKind GetOpKind() const { return op_kind_; }
+
+  DECLARE_INSTRUCTION(BitwiseNegatedRight);
+
+ protected:
+  DEFAULT_COPY_CONSTRUCTOR(BitwiseNegatedRight);
+
+ private:
+  // Specifies the bitwise operation, which will be then negated.
+  const InstructionKind op_kind_;
+};
+
 // This instruction computes an intermediate address pointing in the 'middle' of an object. The
 // result pointer cannot be handled by GC, so extra care is taken to make sure that this value is
 // never used across anything that can trigger GC.
@@ -8539,6 +8551,9 @@ class HIntermediateAddress final : public HExpression<2> {
 #endif
 #if defined(ART_ENABLE_CODEGEN_x86) || defined(ART_ENABLE_CODEGEN_x86_64)
 #include "nodes_x86.h"
+#endif
+#if defined(ART_ENABLE_CODEGEN_riscv64)
+#include "nodes_riscv64.h"
 #endif
 
 namespace art HIDDEN {

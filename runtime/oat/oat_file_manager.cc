@@ -312,6 +312,7 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
             hs.NewHandle(soa.Decode<mirror::ClassLoader>(class_loader)));
         // Can not load app image without class loader.
         if (h_loader != nullptr) {
+          oat_file->SetAppImageBegin(image_space->Begin());
           std::string temp_error_msg;
           // Add image space has a race condition since other threads could be reading from the
           // spaces array.
@@ -344,6 +345,7 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
             }
           } else {
             LOG(INFO) << "Failed to add image file: " << temp_error_msg;
+            oat_file->SetAppImageBegin(nullptr);
             dex_files.clear();
             {
               ScopedThreadSuspension sts(self, ThreadState::kSuspended);
@@ -827,7 +829,7 @@ void OatFileManager::RunBackgroundVerification(const std::vector<const DexFile*>
 
   std::string dex_location = dex_files[0]->GetLocation();
   const std::string& data_dir = Runtime::Current()->GetProcessDataDirectory();
-  if (!android::base::StartsWith(dex_location, data_dir)) {
+  if (!dex_location.starts_with(data_dir)) {
     // For now, we only run background verification for secondary dex files.
     // Running it for primary or split APKs could have some undesirable
     // side-effects, like overloading the device on app startup.

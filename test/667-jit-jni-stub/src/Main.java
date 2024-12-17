@@ -24,6 +24,8 @@ public class Main {
       return;
     }
 
+    // Deoptimize callThrough() to ensure it can be JITed afterwards.
+    deoptimizeNativeMethod(Main.class, "callThrough");
     testCompilationUseAndCollection();
     testMixedFramesOnStack();
   }
@@ -65,9 +67,6 @@ public class Main {
     assertFalse(hasJitCompiledEntrypoint(Main.class, "callThrough"));
     assertFalse(hasJitCompiledCode(Main.class, "callThrough"));
     callThrough(Main.class, "testMixedFramesOnStackStage2");
-    // We have just returned through the JIT-compiled JNI stub, so it must still
-    // be compiled (though not necessarily with the entrypoint pointing to it).
-    assertTrue(hasJitCompiledCode(Main.class, "callThrough"));
     // Though the callThrough() is on the stack, that frame is using the GenericJNI
     // and does not prevent the collection of the JNI stub.
     testStubCanBeCollected();
@@ -92,10 +91,6 @@ public class Main {
   }
 
   public static void testStubCanBeCollected() {
-    assertTrue(hasJitCompiledCode(Main.class, "callThrough"));
-    doJitGcsUntilFullJitGcIsScheduled();
-    assertFalse(hasJitCompiledEntrypoint(Main.class, "callThrough"));
-    assertTrue(hasJitCompiledCode(Main.class, "callThrough"));
     jitGc();  // JIT GC without callThrough() on the stack should collect the callThrough() stub.
     assertFalse(hasJitCompiledEntrypoint(Main.class, "callThrough"));
     assertFalse(hasJitCompiledCode(Main.class, "callThrough"));
@@ -136,7 +131,7 @@ public class Main {
       if (++count == 50) {
         throw new Error("TIMEOUT");
       }
-    };
+    }
   }
 
   public static void assertTrue(boolean value) {
@@ -154,9 +149,10 @@ public class Main {
   public static void doNothing() { }
   public static void throwError() { throw new Error(); }
 
-  // Note that the callThrough()'s shorty differs from shorties of the other
-  // native methods used in this test because of the return type `void.`
+  // Note that the callThrough()'s shorty differs from shorties of the other native methods used
+  // in this test (except deoptimizeNativeMethod) because of the return type `void.`
   public native static void callThrough(Class<?> cls, String methodName);
+  public native static void deoptimizeNativeMethod(Class<?> cls, String methodName);
 
   public native static void jitGc();
   public native static boolean isNextJitGcFull();

@@ -21,6 +21,7 @@ package {
     // to get the below license kinds:
     //   SPDX-license-identifier-Apache-2.0
     default_applicable_licenses: ["art_license"],
+    default_team: "trendy_team_art_mainline",
 }
 
 cc_defaults {
@@ -31,41 +32,22 @@ cc_defaults {
         "odr_compilation_log.cc",
         "odr_fs_utils.cc",
         "odr_metrics.cc",
-        "odr_metrics_record.cc",
     ],
     local_include_dirs: ["include"],
     header_libs: ["dexoptanalyzer_headers"],
     generated_sources: [
-        "apex-info-list-tinyxml",
-        "art-apex-cache-info",
         "art-odrefresh-operator-srcs",
     ],
     shared_libs: [
-        "libbase",
         "liblog",
-        "libselinux",
     ],
     static_libs: [
         "libmodules-utils-build",
     ],
     tidy: true,
-    tidy_disabled_srcs: [":art-apex-cache-info"],
     tidy_flags: [
         "-format-style=file",
         "-header-filter=(art/odrefresh/|system/apex/)",
-    ],
-}
-
-cc_defaults {
-    name: "odrefresh_binary_defaults",
-    defaults: [
-        "art_defaults",
-        "odrefresh-defaults",
-    ],
-    srcs: ["odrefresh_main.cc"],
-    shared_libs: [
-        "libarttools", // Contains "libc++fs".
-        "libdexfile",
     ],
     target: {
         android: {
@@ -74,18 +56,61 @@ cc_defaults {
     },
 }
 
-cc_library_headers {
-    name: "odrefresh_headers",
+cc_defaults {
+    name: "odrefresh_binary_defaults",
+    defaults: [
+        "art_defaults",
+        "odrefresh-defaults",
+    ],
+    srcs: [
+        "odr_metrics_record.cc",
+        "odrefresh_main.cc",
+    ],
+    generated_sources: [
+        "apex-info-list-tinyxml",
+        "art-apex-cache-info",
+    ],
+    tidy_disabled_srcs: [":art-apex-cache-info"],
+    shared_libs: [
+        "libarttools",
+        "libbase",
+        "libdexfile",
+        "libselinux",
+    ],
+}
+
+cc_defaults {
+    name: "odrefresh_headers_defaults",
     defaults: ["art_defaults"],
     export_include_dirs: ["include"],
     host_supported: true,
     stl: "none",
     system_shared_libs: [],
     sdk_version: "minimum", // The minimum sdk version required by users of this module.
+}
+
+cc_library_headers {
+    name: "odrefresh_headers",
+    defaults: ["odrefresh_headers_defaults"],
     apex_available: [
         "//apex_available:platform", // For odsign.
     ],
     visibility: ["//visibility:public"],
+}
+
+// Same header as above, but for use within the ART module. This is separated
+// from above so that the build system doesn't incorrectly recognize it as a
+// dependency of the ART module exported by the platform.
+cc_library_headers {
+    name: "odrefresh_headers_art",
+    defaults: ["odrefresh_headers_defaults"],
+    apex_available: [
+        "com.android.art",
+        "com.android.art.debug",
+    ],
+    visibility: [
+        "//art:__subpackages__",
+    ],
 }
 
 gensrcs {
@@ -196,6 +221,10 @@ art_cc_defaults {
         "odr_metrics_record_test.cc",
         "odrefresh_test.cc",
     ],
+    generated_headers: [
+        "apex-info-list-tinyxml",
+        "art-apex-cache-info",
+    ],
     static_libs: [
         "libgmock",
     ],
@@ -212,6 +241,7 @@ art_cc_test {
     host_supported: false,
     shared_libs: [
         "libarttools",
+        "libbase",
     ],
     // The test config template is needed even though it's not used by the test
     // runner. Otherwise, Soong will generate a test config, which is adding
@@ -230,7 +260,9 @@ art_cc_test {
     ],
     static_libs: [
         "libarttools",
+        "libbase",
     ],
+    test_config_template: ":art-gtests-target-standalone-non-multilib-template",
 }
 
 genrule {

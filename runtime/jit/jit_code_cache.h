@@ -25,6 +25,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "android-base/thread_annotations.h"
 #include "base/arena_containers.h"
 #include "base/array_ref.h"
 #include "base/atomic.h"
@@ -285,11 +286,9 @@ class JitCodeCache {
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Locks::jit_lock_);
   void FreeLocked(JitMemoryRegion* region, const uint8_t* code, const uint8_t* data)
-      REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(Locks::jit_lock_);
 
-  // Perform a collection on the code cache.
-  EXPORT void GarbageCollectCache(Thread* self)
+  void IncreaseCodeCacheCapacity(Thread* self)
       REQUIRES(!Locks::jit_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -358,6 +357,11 @@ class JitCodeCache {
 
   bool IsOsrCompiled(ArtMethod* method) REQUIRES(!Locks::jit_lock_);
 
+  // Visit GC roots (except j.l.Class and j.l.String) held by JIT-ed code.
+  template<typename RootVisitorType>
+  EXPORT void VisitRootTables(ArtMethod* method,
+                              RootVisitorType& visitor) NO_THREAD_SAFETY_ANALYSIS;
+
   void SweepRootTables(IsMarkedVisitor* visitor)
       REQUIRES(!Locks::jit_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -416,15 +420,25 @@ class JitCodeCache {
   }
 
   ProfilingInfo* GetProfilingInfo(ArtMethod* method, Thread* self);
-  void ResetHotnessCounter(ArtMethod* method, Thread* self);
   void MaybeUpdateInlineCache(ArtMethod* method,
                               uint32_t dex_pc,
                               ObjPtr<mirror::Class> cls,
                               Thread* self)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  // NO_THREAD_SAFETY_ANALYSIS because we may be called with the JIT lock held
+  // or not. The implementation of this method handles the two cases.
+  void AddZombieCode(ArtMethod* method, const void* code_ptr) NO_THREAD_SAFETY_ANALYSIS;
+
+  EXPORT void DoCollection(Thread* self)
+      REQUIRES(!Locks::jit_lock_);
+
  private:
   JitCodeCache();
+
+  void AddZombieCodeInternal(ArtMethod* method, const void* code_ptr)
+      REQUIRES(Locks::jit_mutator_lock_)
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
   ProfilingInfo* AddProfilingInfoInternal(Thread* self,
                                           ArtMethod* method,
@@ -433,20 +447,13 @@ class JitCodeCache {
       REQUIRES(Locks::jit_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // If a collection is in progress, wait for it to finish. Must be called with the mutator lock.
-  // The non-mutator lock version should be used if possible. This method will release then
-  // re-acquire the mutator lock.
-  void WaitForPotentialCollectionToCompleteRunnable(Thread* self)
-      REQUIRES(Locks::jit_lock_, !Roles::uninterruptible_) REQUIRES_SHARED(Locks::mutator_lock_);
-
   // If a collection is in progress, wait for it to finish. Return
   // whether the thread actually waited.
   bool WaitForPotentialCollectionToComplete(Thread* self)
-      REQUIRES(Locks::jit_lock_) REQUIRES(!Locks::mutator_lock_);
+      REQUIRES(Locks::jit_lock_) REQUIRES_SHARED(!Locks::mutator_lock_);
 
   // Remove CHA dependents and underlying allocations for entries in `method_headers`.
   void FreeAllMethodHeaders(const std::unordered_set<OatQuickMethodHeader*>& method_headers)
-      REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(Locks::jit_lock_)
       REQUIRES(!Locks::cha_lock_);
 
@@ -458,12 +465,11 @@ class JitCodeCache {
 
   // Call given callback for every compiled method in the code cache.
   void VisitAllMethods(const std::function<void(const void*, ArtMethod*)>& cb)
-      REQUIRES(Locks::jit_lock_);
+      REQUIRES_SHARED(Locks::jit_mutator_lock_);
 
   // Free code and data allocations for `code_ptr`.
   void FreeCodeAndData(const void* code_ptr)
-      REQUIRES(Locks::jit_lock_)
-      REQUIRES_SHARED(Locks::mutator_lock_);
+      REQUIRES(Locks::jit_lock_);
 
   // Number of bytes allocated in the code cache.
   size_t CodeCacheSize() REQUIRES(!Locks::jit_lock_);
@@ -477,15 +483,8 @@ class JitCodeCache {
   // Number of bytes allocated in the data cache.
   size_t DataCacheSizeLocked() REQUIRES(Locks::jit_lock_);
 
-  // Notify all waiting threads that a collection is done.
-  void NotifyCollectionDone(Thread* self) REQUIRES(Locks::jit_lock_);
-
   // Return whether the code cache's capacity is at its maximum.
   bool IsAtMaxCapacity() const REQUIRES(Locks::jit_lock_);
-
-  void DoCollection(Thread* self)
-      REQUIRES(!Locks::jit_lock_)
-      REQUIRES_SHARED(Locks::mutator_lock_);
 
   void RemoveUnmarkedCode(Thread* self)
       REQUIRES(!Locks::jit_lock_)
@@ -511,6 +510,8 @@ class JitCodeCache {
   void WaitUntilInlineCacheAccessible(Thread* self)
       REQUIRES(!Locks::jit_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
+
+  EXPORT const uint8_t* GetRootTable(const void* code_ptr, uint32_t* number_of_roots = nullptr);
 
   class JniStubKey;
   class JniStubData;
@@ -548,19 +549,28 @@ class JitCodeCache {
   // before the declaring class memory is freed.
 
   // Holds compiled code associated with the shorty for a JNI stub.
-  SafeMap<JniStubKey, JniStubData> jni_stubs_map_ GUARDED_BY(Locks::jit_lock_);
+  SafeMap<JniStubKey, JniStubData> jni_stubs_map_ GUARDED_BY(Locks::jit_mutator_lock_);
 
   // Holds compiled code associated to the ArtMethod.
-  SafeMap<const void*, ArtMethod*> method_code_map_ GUARDED_BY(Locks::jit_lock_);
+  SafeMap<const void*, ArtMethod*> method_code_map_ GUARDED_BY(Locks::jit_mutator_lock_);
+  // Subset of `method_code_map_`, but keyed by `ArtMethod*`. Used to treat certain
+  // objects (like `MethodType`-s) as strongly reachable from the corresponding ArtMethod.
+  SafeMap<ArtMethod*, std::vector<const void*>> method_code_map_reversed_
+      GUARDED_BY(Locks::jit_mutator_lock_);
 
   // Holds compiled code associated to the ArtMethod. Used when pre-jitting
   // methods whose entrypoints have the resolution stub.
-  SafeMap<ArtMethod*, const void*> saved_compiled_methods_map_ GUARDED_BY(Locks::jit_lock_);
+  SafeMap<ArtMethod*, const void*> saved_compiled_methods_map_ GUARDED_BY(Locks::jit_mutator_lock_);
 
   // Holds osr compiled code associated to the ArtMethod.
-  SafeMap<ArtMethod*, const void*> osr_code_map_ GUARDED_BY(Locks::jit_lock_);
+  SafeMap<ArtMethod*, const void*> osr_code_map_ GUARDED_BY(Locks::jit_mutator_lock_);
 
-  // ProfilingInfo objects we have allocated.
+  // Zombie code and JNI methods to consider for collection.
+  std::set<const void*> zombie_code_ GUARDED_BY(Locks::jit_mutator_lock_);
+  std::set<ArtMethod*> zombie_jni_code_ GUARDED_BY(Locks::jit_mutator_lock_);
+
+  // ProfilingInfo objects we have allocated. Mutators don't need to access
+  // these so this can be guarded by the JIT lock.
   SafeMap<ArtMethod*, ProfilingInfo*> profiling_infos_ GUARDED_BY(Locks::jit_lock_);
 
   // Methods that the zygote has compiled and can be shared across processes
@@ -569,17 +579,24 @@ class JitCodeCache {
 
   // -------------- JIT GC related data structures ----------------------- //
 
-  // Condition to wait on during collection.
+  // Condition to wait on during collection and for accessing weak references in inline caches.
   ConditionVariable lock_cond_ GUARDED_BY(Locks::jit_lock_);
 
   // Whether there is a code cache collection in progress.
   bool collection_in_progress_ GUARDED_BY(Locks::jit_lock_);
+
+  // Whether a GC task is already scheduled.
+  std::atomic<bool> gc_task_scheduled_;
 
   // Bitmap for collecting code and data.
   std::unique_ptr<CodeCacheBitmap> live_bitmap_;
 
   // Whether we can do garbage collection. Not 'const' as tests may override this.
   bool garbage_collect_code_ GUARDED_BY(Locks::jit_lock_);
+
+  // Zombie code being processed by the GC.
+  std::set<const void*> processed_zombie_code_ GUARDED_BY(Locks::jit_lock_);
+  std::set<ArtMethod*> processed_zombie_jni_code_ GUARDED_BY(Locks::jit_lock_);
 
   // ---------------- JIT statistics -------------------------------------- //
 

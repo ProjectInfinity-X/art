@@ -17,6 +17,7 @@
 #ifndef ART_ARTD_ARTD_H_
 #define ART_ARTD_ARTD_H_
 
+#include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 
@@ -46,6 +47,13 @@
 namespace art {
 namespace artd {
 
+android::base::Result<void> Restorecon(
+    const std::string& path,
+    const std::optional<
+        aidl::com::android::server::art::OutputArtifacts::PermissionSettings::SeContext>&
+        se_context,
+    bool recurse);
+
 struct Options {
   // If true, this artd instance is for Pre-reboot Dexopt. It runs in a chroot environment that is
   // set up by dexopt_chroot_setup.
@@ -61,6 +69,12 @@ class ArtdCancellationSignal : public aidl::com::android::server::art::BnArtdCan
 
   ndk::ScopedAStatus getType(int64_t* _aidl_return) override;
 
+  // Returns callbacks to be provided to `ExecUtils`, to register/unregister the process with this
+  // cancellation signal.
+  ExecCallbacks CreateExecCallbacks();
+
+  bool IsCancelled();
+
  private:
   std::mutex mu_;
   // True if cancellation has been signaled.
@@ -69,23 +83,35 @@ class ArtdCancellationSignal : public aidl::com::android::server::art::BnArtdCan
   std::unordered_set<pid_t> pids_ GUARDED_BY(mu_);
 
   std::function<int(pid_t, int)> kill_;
-
-  friend class Artd;
 };
 
 class Artd : public aidl::com::android::server::art::BnArtd {
  public:
-  explicit Artd(Options&& options,
-                std::unique_ptr<art::tools::SystemProperties> props =
-                    std::make_unique<art::tools::SystemProperties>(),
-                std::unique_ptr<ExecUtils> exec_utils = std::make_unique<ExecUtils>(),
-                std::function<int(pid_t, int)> kill_func = kill,
-                std::function<int(int, struct stat*)> fstat_func = fstat)
+  explicit Artd(
+      Options&& options,
+      std::unique_ptr<art::tools::SystemProperties> props =
+          std::make_unique<art::tools::SystemProperties>(),
+      std::unique_ptr<ExecUtils> exec_utils = std::make_unique<ExecUtils>(),
+      std::function<int(pid_t, int)> kill_func = kill,
+      std::function<int(int, struct stat*)> fstat_func = fstat,
+      std::function<int(const char*, const char*, const char*, uint32_t, const void*)> mount_func =
+          mount,
+      std::function<android::base::Result<void>(
+          const std::string&,
+          const std::optional<
+              aidl::com::android::server::art::OutputArtifacts::PermissionSettings::SeContext>&,
+          bool)> restorecon_func = Restorecon,
+      std::optional<std::string> pre_reboot_tmp_dir = std::nullopt,
+      std::optional<std::string> init_environ_rc_path = std::nullopt)
       : options_(std::move(options)),
         props_(std::move(props)),
         exec_utils_(std::move(exec_utils)),
         kill_(std::move(kill_func)),
-        fstat_(std::move(fstat_func)) {}
+        fstat_(std::move(fstat_func)),
+        mount_(std::move(mount_func)),
+        restorecon_(std::move(restorecon_func)),
+        pre_reboot_tmp_dir_(std::move(pre_reboot_tmp_dir)),
+        init_environ_rc_path_(std::move(init_environ_rc_path)) {}
 
   ndk::ScopedAStatus isAlive(bool* _aidl_return) override;
 
@@ -177,7 +203,10 @@ class Artd : public aidl::com::android::server::art::BnArtd {
       const std::vector<aidl::com::android::server::art::VdexPath>& in_vdexFilesToKeep,
       const std::vector<aidl::com::android::server::art::RuntimeArtifactsPath>&
           in_runtimeArtifactsToKeep,
+      bool in_keepPreRebootStagedFiles,
       int64_t* _aidl_return) override;
+
+  ndk::ScopedAStatus cleanUpPreRebootStagedFiles() override;
 
   ndk::ScopedAStatus isInDalvikCache(const std::string& in_dexFile, bool* _aidl_return) override;
 
@@ -198,6 +227,27 @@ class Artd : public aidl::com::android::server::art::BnArtd {
 
   ndk::ScopedAStatus getProfileSize(const aidl::com::android::server::art::ProfilePath& in_profile,
                                     int64_t* _aidl_return) override;
+
+  ndk::ScopedAStatus commitPreRebootStagedFiles(
+      const std::vector<aidl::com::android::server::art::ArtifactsPath>& in_artifacts,
+      const std::vector<aidl::com::android::server::art::ProfilePath::WritableProfilePath>&
+          in_profiles,
+      bool* _aidl_return) override;
+
+  ndk::ScopedAStatus checkPreRebootSystemRequirements(const std::string& in_chrootDir,
+                                                      bool* _aidl_return) override;
+
+  ndk::ScopedAStatus preRebootInit(
+      const std::shared_ptr<aidl::com::android::server::art::IArtdCancellationSignal>&
+          in_cancellationSignal,
+      bool* _aidl_return) override;
+
+  ndk::ScopedAStatus validateDexPath(const std::string& in_dexFile,
+                                     std::optional<std::string>* _aidl_return) override;
+
+  ndk::ScopedAStatus validateClassLoaderContext(const std::string& in_dexFile,
+                                                const std::string& in_classLoaderContext,
+                                                std::optional<std::string>* _aidl_return) override;
 
   android::base::Result<void> Start();
 
@@ -226,7 +276,7 @@ class Artd : public aidl::com::android::server::art::BnArtd {
 
   android::base::Result<std::string> GetProfman();
 
-  android::base::Result<std::string> GetArtExec();
+  android::base::Result<tools::CmdlineBuilder> GetArtExecCmdlineBuilder();
 
   bool ShouldUseDex2Oat64();
 
@@ -248,11 +298,22 @@ class Artd : public aidl::com::android::server::art::BnArtd {
 
   android::base::Result<struct stat> Fstat(const art::File& file) const;
 
+  // Creates a new dir at `source` and bind-mounts it at `target`.
+  android::base::Result<void> BindMountNewDir(const std::string& source,
+                                              const std::string& target) const;
+
+  android::base::Result<void> BindMount(const std::string& source, const std::string& target) const;
+
   ndk::ScopedAStatus CopyAndRewriteProfileImpl(
       File src,
       aidl::com::android::server::art::OutputProfile* dst_aidl,
       const std::string& dex_path,
       aidl::com::android::server::art::CopyAndRewriteProfileResult* aidl_return);
+
+  android::base::Result<void> PreRebootInitClearEnvs();
+  android::base::Result<void> PreRebootInitSetEnvFromFile(const std::string& path);
+  android::base::Result<void> PreRebootInitDeriveClasspath(const std::string& path);
+  android::base::Result<bool> PreRebootInitBootImages(ArtdCancellationSignal* cancellation_signal);
 
   std::mutex cache_mu_;
   std::optional<std::vector<std::string>> cached_boot_image_locations_ GUARDED_BY(cache_mu_);
@@ -269,6 +330,35 @@ class Artd : public aidl::com::android::server::art::BnArtd {
   const std::unique_ptr<ExecUtils> exec_utils_;
   const std::function<int(pid_t, int)> kill_;
   const std::function<int(int, struct stat*)> fstat_;
+  const std::function<int(const char*, const char*, const char*, uint32_t, const void*)> mount_;
+  const std::function<android::base::Result<void>(
+      const std::string&,
+      const std::optional<
+          aidl::com::android::server::art::OutputArtifacts::PermissionSettings::SeContext>&,
+      bool)>
+      restorecon_;
+  const std::optional<std::string> pre_reboot_tmp_dir_;
+  const std::optional<std::string> init_environ_rc_path_;
+};
+
+// A class for getting system properties from a `build.prop` file.
+// Note that this class ignores import statements and only reads properties from the given file
+// itself. To read properties from an imported file, insatiate this class with the imported file
+// directly.
+class BuildSystemProperties : public tools::SystemProperties {
+ public:
+  // Creates an instance and loads system properties from the `build.prop` file specified at the
+  // given path.
+  static android::base::Result<BuildSystemProperties> Create(const std::string& filename);
+
+ protected:
+  std::string GetProperty(const std::string& key) const override;
+
+ private:
+  explicit BuildSystemProperties(std::unordered_map<std::string, std::string>&& system_properties)
+      : system_properties_(std::move(system_properties)) {}
+
+  const std::unordered_map<std::string, std::string> system_properties_;
 };
 
 }  // namespace artd

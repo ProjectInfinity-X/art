@@ -18,8 +18,8 @@
 
 #include "arch/instruction_set_features.h"
 #include "art_method-inl.h"
-#include "base/enums.h"
 #include "base/file_utils.h"
+#include "base/pointer_size.h"
 #include "base/stl_util.h"
 #include "base/unix_file/fd_file.h"
 #include "class_linker.h"
@@ -109,8 +109,7 @@ class OatTest : public CommonCompilerDriverTest {
     OatWriter oat_writer(*compiler_options_,
                          verification_results_.get(),
                          &timings,
-                         /*profile_compilation_info*/nullptr,
-                         CompactDexLevel::kCompactDexLevelNone);
+                         /*profile_compilation_info*/nullptr);
     for (const DexFile* dex_file : dex_files) {
       if (!oat_writer.AddRawDexFileSource(dex_file->GetContainer(),
                                           dex_file->Begin(),
@@ -135,8 +134,7 @@ class OatTest : public CommonCompilerDriverTest {
     OatWriter oat_writer(*compiler_options_,
                          verification_results_.get(),
                          &timings,
-                         profile_compilation_info,
-                         CompactDexLevel::kCompactDexLevelNone);
+                         profile_compilation_info);
     for (const char* dex_filename : dex_filenames) {
       if (!oat_writer.AddDexFileSource(dex_filename, dex_filename)) {
         return false;
@@ -158,8 +156,7 @@ class OatTest : public CommonCompilerDriverTest {
     OatWriter oat_writer(*compiler_options_,
                          verification_results_.get(),
                          &timings,
-                         profile_compilation_info,
-                         CompactDexLevel::kCompactDexLevelNone);
+                         profile_compilation_info);
     if (!oat_writer.AddDexFileSource(std::move(dex_file_fd), location)) {
       return false;
     }
@@ -210,7 +207,8 @@ class OatTest : public CommonCompilerDriverTest {
     oat_writer.PrepareLayout(&patcher);
     elf_writer->PrepareDynamicSection(oat_writer.GetOatHeader().GetExecutableOffset(),
                                       oat_writer.GetCodeSize(),
-                                      oat_writer.GetDataBimgRelRoSize(),
+                                      oat_writer.GetDataImgRelRoSize(),
+                                      oat_writer.GetDataImgRelRoAppImageOffset(),
                                       oat_writer.GetBssSize(),
                                       oat_writer.GetBssMethodsOffset(),
                                       oat_writer.GetBssRootsOffset(),
@@ -228,12 +226,12 @@ class OatTest : public CommonCompilerDriverTest {
     }
     elf_writer->EndText(text);
 
-    if (oat_writer.GetDataBimgRelRoSize() != 0u) {
-      OutputStream* data_bimg_rel_ro = elf_writer->StartDataBimgRelRo();
-      if (!oat_writer.WriteDataBimgRelRo(data_bimg_rel_ro)) {
+    if (oat_writer.GetDataImgRelRoSize() != 0u) {
+      OutputStream* data_img_rel_ro = elf_writer->StartDataImgRelRo();
+      if (!oat_writer.WriteDataImgRelRo(data_img_rel_ro)) {
         return false;
       }
-      elf_writer->EndDataBimgRelRo(data_bimg_rel_ro);
+      elf_writer->EndDataImgRelRo(data_img_rel_ro);
     }
 
     if (!oat_writer.WriteHeader(elf_writer->GetStream())) {
@@ -504,7 +502,7 @@ TEST_F(OatTest, OatHeaderSizeCheck) {
   EXPECT_EQ(68U, sizeof(OatHeader));
   EXPECT_EQ(4U, sizeof(OatMethodOffsets));
   EXPECT_EQ(4U, sizeof(OatQuickMethodHeader));
-  EXPECT_EQ(170 * static_cast<size_t>(GetInstructionSetPointerSize(kRuntimeISA)),
+  EXPECT_EQ(173 * static_cast<size_t>(GetInstructionSetPointerSize(kRuntimeISA)),
             sizeof(QuickEntryPoints));
 }
 

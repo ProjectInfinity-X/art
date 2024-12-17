@@ -17,6 +17,7 @@
 // Test is in compiler, as it uses compiler related code.
 #include "verifier/verifier_deps.h"
 
+#include "aot_class_linker.h"
 #include "art_method-inl.h"
 #include "base/indenter.h"
 #include "class_linker.h"
@@ -45,6 +46,10 @@ class VerifierDepsCompilerCallbacks : public CompilerCallbacks {
   VerifierDepsCompilerCallbacks()
       : CompilerCallbacks(CompilerCallbacks::CallbackMode::kCompileApp),
         deps_(nullptr) {}
+
+  ClassLinker* CreateAotClassLinker(InternTable* intern_table) override {
+    return new AotClassLinker(intern_table);
+  }
 
   void AddUncompilableMethod([[maybe_unused]] MethodReference ref) override {}
   void AddUncompilableClass([[maybe_unused]] ClassReference ref) override {}
@@ -310,7 +315,7 @@ class VerifierDepsTest : public CommonCompilerDriverTest {
   // Load the dex file again with a new class loader, decode the VerifierDeps
   // in `buffer`, allow the caller to modify the deps and then run validation.
   template<typename Fn>
-  bool RunValidation(Fn fn, const std::vector<uint8_t>& buffer, std::string* error_msg) {
+  bool RunValidation(Fn fn, const std::vector<uint8_t>& buffer) {
     ScopedObjectAccess soa(Thread::Current());
 
     jobject second_loader = LoadDex("VerifierDeps");
@@ -329,10 +334,9 @@ class VerifierDepsTest : public CommonCompilerDriverTest {
     Handle<mirror::ClassLoader> new_class_loader =
         hs.NewHandle<mirror::ClassLoader>(soa.Decode<mirror::ClassLoader>(second_loader));
 
-    return decoded_deps.ValidateDependencies(soa.Self(),
-                                             new_class_loader,
-                                             second_dex_files,
-                                             error_msg);
+    return decoded_deps.ValidateDependenciesAndUpdateStatus(soa.Self(),
+                                                            new_class_loader,
+                                                            second_dex_files);
   }
 
   std::unique_ptr<verifier::VerifierDeps> verifier_deps_;
@@ -564,8 +568,6 @@ TEST_F(VerifierDepsTest, UnverifiedOrder) {
 }
 
 TEST_F(VerifierDepsTest, VerifyDeps) {
-  std::string error_msg;
-
   VerifyDexFile();
   ASSERT_EQ(1u, NumberOfCompiledDexFiles());
   ASSERT_TRUE(HasEachKindOfRecord());
@@ -579,8 +581,7 @@ TEST_F(VerifierDepsTest, VerifyDeps) {
   ASSERT_FALSE(buffer.empty());
 
   // Check that dependencies are satisfied after decoding `buffer`.
-  ASSERT_TRUE(RunValidation([](VerifierDeps::DexFileDeps&) {}, buffer, &error_msg))
-      << error_msg;
+  ASSERT_TRUE(RunValidation([](VerifierDeps::DexFileDeps&) {}, buffer));
 }
 
 TEST_F(VerifierDepsTest, CompilerDriver) {

@@ -179,11 +179,11 @@ template <typename T, size_t size> class DexCachePairArray {
   }
 
   DexCachePair<T> GetPair(uint32_t index) {
-    return entries_[SlotIndex(index)].load(std::memory_order_relaxed);
+    return entries_[SlotIndex(index)].load(std::memory_order_acquire);
   }
 
   void SetPair(uint32_t index, DexCachePair<T> value) {
-    entries_[SlotIndex(index)].store(value, std::memory_order_relaxed);
+    entries_[SlotIndex(index)].store(value, std::memory_order_release);
   }
 
   void Clear(uint32_t index) {
@@ -374,7 +374,7 @@ class MANAGED DexCache final : public Object {
 
   void SetClassLoader(ObjPtr<ClassLoader> class_loader) REQUIRES_SHARED(Locks::mutator_lock_);
 
-  ObjPtr<ClassLoader> GetClassLoader() REQUIRES_SHARED(Locks::mutator_lock_);
+  EXPORT ObjPtr<ClassLoader> GetClassLoader() REQUIRES_SHARED(Locks::mutator_lock_);
 
   template <VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
             ReadBarrierOption kReadBarrierOption = kWithReadBarrier,
@@ -505,7 +505,7 @@ class MANAGED DexCache final : public Object {
                     kDexCacheFieldCacheSize,
                     LinearAllocKind::kNoGCRoots,
                     NativeArray<ArtField>,
-                    ArtField,
+                    ArtField*,
                     NumFieldIds,
                     LinearAllocKind::kNoGCRoots)
 
@@ -527,7 +527,7 @@ class MANAGED DexCache final : public Object {
                     kDexCacheMethodCacheSize,
                     LinearAllocKind::kNoGCRoots,
                     NativeArray<ArtMethod>,
-                    ArtMethod,
+                    ArtMethod*,
                     NumMethodIds,
                     LinearAllocKind::kNoGCRoots)
 

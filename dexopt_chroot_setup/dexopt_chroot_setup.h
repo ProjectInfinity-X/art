@@ -17,17 +17,49 @@
 #ifndef ART_DEXOPT_CHROOT_SETUP_DEXOPT_CHROOT_SETUP_H_
 #define ART_DEXOPT_CHROOT_SETUP_DEXOPT_CHROOT_SETUP_H_
 
+#include <optional>
+#include <string>
+
 #include "aidl/com/android/server/art/BnDexoptChrootSetup.h"
 #include "android-base/result.h"
+#include "android-base/thread_annotations.h"
 
 namespace art {
 namespace dexopt_chroot_setup {
 
+// A comma-separated list, where each entry is a colon-separated pair of a partition name in the
+// super image and a mount point. E.g.,
+// some_partition_1:/some_mount_point_1,some_partition_2:/some_mount_point_2
+constexpr const char* kAdditionalPartitionsSysprop =
+    "dalvik.vm.pr_dexopt_additional_system_partitions";
+
 // A service that sets up the chroot environment for Pre-reboot Dexopt.
 class DexoptChrootSetup : public aidl::com::android::server::art::BnDexoptChrootSetup {
  public:
+  ndk::ScopedAStatus setUp(const std::optional<std::string>& in_otaSlot,
+                           bool in_mapSnapshotsForOta) override;
+
+  ndk::ScopedAStatus init() override;
+
+  ndk::ScopedAStatus tearDown(bool in_allowConcurrent) override;
+
   android::base::Result<void> Start();
+
+ private:
+  android::base::Result<void> SetUpChroot(const std::optional<std::string>& ota_slot,
+                                          bool map_snapshots_for_ota) const REQUIRES(mu_);
+
+  android::base::Result<void> InitChroot() const REQUIRES(mu_);
+
+  android::base::Result<void> TearDownChroot() const REQUIRES(mu_);
+
+  std::mutex mu_;
 };
+
+std::string PathInChroot(std::string_view path);
+
+android::base::Result<std::string> ConstructLinkerConfigCompatEnvSection(
+    const std::string& art_linker_config_content);
 
 }  // namespace dexopt_chroot_setup
 }  // namespace art

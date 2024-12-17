@@ -126,8 +126,8 @@ void ReadExtensionLibraries(const char* dirname, std::vector<std::string>* sonam
 
         Result<std::vector<std::string>> ret = ReadConfig(
             config_file_path, [&company_name](const struct ConfigEntry& entry) -> Result<bool> {
-              if (android::base::StartsWith(entry.soname, "lib") &&
-                  android::base::EndsWith(entry.soname, "." + company_name + ".so")) {
+              if (entry.soname.starts_with("lib") &&
+                  entry.soname.ends_with("." + company_name + ".so")) {
                 return true;
               } else {
                 return Errorf(
@@ -167,8 +167,8 @@ static std::string InitDefaultPublicLibraries(bool for_preload) {
   if (!for_preload) {
     // Remove the public libs provided by apexes because these libs are available
     // from apex namespaces.
-    for (const std::pair<std::string, std::string>& p : apex_public_libraries()) {
-      std::vector<std::string> public_libs = base::Split(p.second, ":");
+    for (const auto& [_, library_list] : apex_public_libraries()) {
+      std::vector<std::string> public_libs = base::Split(library_list, ":");
       sonames->erase(std::remove_if(sonames->begin(),
                                     sonames->end(),
                                     [&public_libs](const std::string& v) {
@@ -427,9 +427,9 @@ const std::map<std::string, std::string>& apex_public_libraries() {
 
 bool is_product_treblelized() {
 #if defined(ART_TARGET_ANDROID)
-  // Product is treblelized iff the sdk version is newer than U QPR2
+  // Product is treblelized iff the sdk version is newer than U
   // or launching version is R or newer or ro.product.vndk.version is defined
-  return android::modules::sdklevel::IsAtLeastU() ||
+  return android::modules::sdklevel::IsAtLeastV() ||
          android::base::GetIntProperty("ro.product.first_api_level", 0) >= __ANDROID_API_R__ ||
          android::sysprop::VndkProperties::product_vndk_version().has_value();
 #else

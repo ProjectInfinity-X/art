@@ -62,9 +62,6 @@ inline bool IsSubRightSubLeftShl(HSub *sub) {
 }  // namespace helpers
 
 bool TryCombineMultiplyAccumulate(HMul* mul, InstructionSet isa);
-// For bitwise operations (And/Or/Xor) with a negated input, try to use
-// a negated bitwise instruction.
-bool TryMergeNegatedInput(HBinaryOperation* op);
 
 bool TryExtractArrayAccessAddress(CodeGenerator* codegen,
                                   HInstruction* access,
@@ -79,6 +76,14 @@ bool TryExtractVecArrayAccessAddress(HVecMemoryOperation* access, HInstruction* 
 // with
 //   Add(c, Sub(b, a))
 bool TryReplaceSubSubWithSubAdd(HSub* last_sub);
+
+// ARM does not contain instruction ROL so replace
+//   ROL dest, a, distance
+// with
+//   NEG neg, distance
+//   ROR dest, a, neg
+// before GVN to give it a chance to deduplicate the instructions, if it's able.
+void UnfoldRotateLeft(HRol* rol);
 
 }  // namespace art
 

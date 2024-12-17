@@ -151,15 +151,18 @@ public class UtilsTest {
         Utils.getAllAbis(pkgState);
     }
 
-    @Test(expected = IllegalStateException.class)
+    @Test
     public void testGetAllAbisUnsupportedTranslation() {
         lenient().when(SystemProperties.get(eq("ro.dalvik.vm.isa.x86_64"))).thenReturn("");
+        lenient().when(SystemProperties.get(eq("ro.dalvik.vm.isa.x86"))).thenReturn("");
 
         var pkgState = mock(PackageState.class);
         when(pkgState.getPrimaryCpuAbi()).thenReturn("x86_64");
-        when(pkgState.getSecondaryCpuAbi()).thenReturn(null);
+        when(pkgState.getSecondaryCpuAbi()).thenReturn("x86");
 
-        Utils.getAllAbis(pkgState);
+        when(Constants.getPreferredAbi()).thenReturn("armeabi-v7a");
+        assertThat(Utils.getAllAbis(pkgState))
+                .containsExactly(Utils.Abi.create("armeabi-v7a", "arm", true /* isPrimaryAbi */));
     }
 
     @Test
@@ -199,5 +202,22 @@ public class UtilsTest {
     public void testExecuteAndWaitPropagatesException() {
         Executor executor = ForkJoinPool.commonPool();
         Utils.executeAndWait(executor, () -> { throw new IllegalArgumentException(); });
+    }
+
+    @Test
+    public void testPathStartsWith() {
+        assertThat(Utils.pathStartsWith("/a/b", "/a")).isTrue();
+        assertThat(Utils.pathStartsWith("/a/b", "/a/")).isTrue();
+
+        assertThat(Utils.pathStartsWith("/a/c", "/a/b")).isFalse();
+        assertThat(Utils.pathStartsWith("/ab", "/a")).isFalse();
+
+        assertThat(Utils.pathStartsWith("/a", "/a")).isTrue();
+        assertThat(Utils.pathStartsWith("/a/", "/a")).isTrue();
+        assertThat(Utils.pathStartsWith("/a", "/a/")).isTrue();
+
+        assertThat(Utils.pathStartsWith("/a", "/")).isTrue();
+        assertThat(Utils.pathStartsWith("/", "/")).isTrue();
+        assertThat(Utils.pathStartsWith("/", "/a")).isFalse();
     }
 }

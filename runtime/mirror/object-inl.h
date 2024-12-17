@@ -46,7 +46,7 @@ namespace mirror {
 
 inline uint32_t Object::ClassSize(PointerSize pointer_size) {
   uint32_t vtable_entries = kVTableLength;
-  return Class::ComputeClassSize(true, vtable_entries, 0, 0, 0, 0, 0, pointer_size);
+  return Class::ComputeClassSize(true, vtable_entries, 0, 0, 0, 0, 0, 0, pointer_size);
 }
 
 template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
@@ -345,6 +345,7 @@ inline bool Object::IsPhantomReferenceInstance() {
   return GetClass<kVerifyFlags>()->IsPhantomReferenceClass();
 }
 
+// TODO: optimize this by using class_flags_ to determine type
 template<VerifyObjectFlags kVerifyFlags>
 inline size_t Object::SizeOf() {
   // Read barrier is never required for SizeOf since objects sizes are constant. Reading from-space
@@ -393,11 +394,8 @@ template<bool kTransactionActive,
 inline void Object::SetFieldBoolean(MemberOffset field_offset, uint8_t new_value) {
   VerifyTransaction<kTransactionActive, kCheckTransaction>();
   if (kTransactionActive) {
-    Runtime::Current()->RecordWriteFieldBoolean(
-        this,
-        field_offset,
-        GetFieldBoolean<kVerifyFlags, kIsVolatile>(field_offset),
-        kIsVolatile);
+    Runtime::Current()->GetClassLinker()->RecordWriteFieldBoolean(
+        this, field_offset, GetFieldBoolean<kVerifyFlags, kIsVolatile>(field_offset), kIsVolatile);
   }
   Verify<kVerifyFlags>();
   SetFieldPrimitive<uint8_t, kIsVolatile>(field_offset, new_value);
@@ -410,10 +408,8 @@ template<bool kTransactionActive,
 inline void Object::SetFieldByte(MemberOffset field_offset, int8_t new_value) {
   VerifyTransaction<kTransactionActive, kCheckTransaction>();
   if (kTransactionActive) {
-    Runtime::Current()->RecordWriteFieldByte(this,
-                                             field_offset,
-                                             GetFieldByte<kVerifyFlags, kIsVolatile>(field_offset),
-                                             kIsVolatile);
+    Runtime::Current()->GetClassLinker()->RecordWriteFieldByte(
+        this, field_offset, GetFieldByte<kVerifyFlags, kIsVolatile>(field_offset), kIsVolatile);
   }
   Verify<kVerifyFlags>();
   SetFieldPrimitive<int8_t, kIsVolatile>(field_offset, new_value);
@@ -460,10 +456,8 @@ template<bool kTransactionActive,
 inline void Object::SetFieldChar(MemberOffset field_offset, uint16_t new_value) {
   VerifyTransaction<kTransactionActive, kCheckTransaction>();
   if (kTransactionActive) {
-    Runtime::Current()->RecordWriteFieldChar(this,
-                                             field_offset,
-                                             GetFieldChar<kVerifyFlags, kIsVolatile>(field_offset),
-                                             kIsVolatile);
+    Runtime::Current()->GetClassLinker()->RecordWriteFieldChar(
+        this, field_offset, GetFieldChar<kVerifyFlags, kIsVolatile>(field_offset), kIsVolatile);
   }
   Verify<kVerifyFlags>();
   SetFieldPrimitive<uint16_t, kIsVolatile>(field_offset, new_value);
@@ -476,10 +470,8 @@ template<bool kTransactionActive,
 inline void Object::SetFieldShort(MemberOffset field_offset, int16_t new_value) {
   VerifyTransaction<kTransactionActive, kCheckTransaction>();
   if (kTransactionActive) {
-    Runtime::Current()->RecordWriteFieldChar(this,
-                                             field_offset,
-                                             GetFieldShort<kVerifyFlags, kIsVolatile>(field_offset),
-                                             kIsVolatile);
+    Runtime::Current()->GetClassLinker()->RecordWriteFieldChar(
+        this, field_offset, GetFieldShort<kVerifyFlags, kIsVolatile>(field_offset), kIsVolatile);
   }
   Verify<kVerifyFlags>();
   SetFieldPrimitive<int16_t, kIsVolatile>(field_offset, new_value);
@@ -504,10 +496,8 @@ template<bool kTransactionActive,
 inline void Object::SetField32(MemberOffset field_offset, int32_t new_value) {
   VerifyTransaction<kTransactionActive, kCheckTransaction>();
   if (kTransactionActive) {
-    Runtime::Current()->RecordWriteField32(this,
-                                           field_offset,
-                                           GetField32<kVerifyFlags, kIsVolatile>(field_offset),
-                                           kIsVolatile);
+    Runtime::Current()->GetClassLinker()->RecordWriteField32(
+        this, field_offset, GetField32<kVerifyFlags, kIsVolatile>(field_offset), kIsVolatile);
   }
   Verify<kVerifyFlags>();
   SetFieldPrimitive<int32_t, kIsVolatile>(field_offset, new_value);
@@ -534,10 +524,8 @@ template<bool kTransactionActive,
 inline void Object::SetField64(MemberOffset field_offset, int64_t new_value) {
   VerifyTransaction<kTransactionActive, kCheckTransaction>();
   if (kTransactionActive) {
-    Runtime::Current()->RecordWriteField64(this,
-                                           field_offset,
-                                           GetField64<kVerifyFlags, kIsVolatile>(field_offset),
-                                           kIsVolatile);
+    Runtime::Current()->GetClassLinker()->RecordWriteField64(
+        this, field_offset, GetField64<kVerifyFlags, kIsVolatile>(field_offset), kIsVolatile);
   }
   Verify<kVerifyFlags>();
   SetFieldPrimitive<int64_t, kIsVolatile>(field_offset, new_value);
@@ -570,13 +558,15 @@ inline bool Object::CasFieldWeakSequentiallyConsistent64(MemberOffset field_offs
                                                          int64_t old_value,
                                                          int64_t new_value) {
   VerifyTransaction<kTransactionActive, kCheckTransaction>();
-  if (kTransactionActive) {
-    Runtime::Current()->RecordWriteField64(this, field_offset, old_value, true);
-  }
   Verify<kVerifyFlags>();
   uint8_t* raw_addr = reinterpret_cast<uint8_t*>(this) + field_offset.Int32Value();
   Atomic<int64_t>* atomic_addr = reinterpret_cast<Atomic<int64_t>*>(raw_addr);
-  return atomic_addr->CompareAndSetWeakSequentiallyConsistent(old_value, new_value);
+  bool success = atomic_addr->CompareAndSetWeakSequentiallyConsistent(old_value, new_value);
+  if (kTransactionActive && success) {
+    Runtime::Current()->GetClassLinker()->RecordWriteField64(
+        this, field_offset, old_value, /*is_volatile=*/ true);
+  }
+  return success;
 }
 
 template<bool kTransactionActive, bool kCheckTransaction, VerifyObjectFlags kVerifyFlags>
@@ -584,13 +574,15 @@ inline bool Object::CasFieldStrongSequentiallyConsistent64(MemberOffset field_of
                                                            int64_t old_value,
                                                            int64_t new_value) {
   VerifyTransaction<kTransactionActive, kCheckTransaction>();
-  if (kTransactionActive) {
-    Runtime::Current()->RecordWriteField64(this, field_offset, old_value, true);
-  }
   Verify<kVerifyFlags>();
   uint8_t* raw_addr = reinterpret_cast<uint8_t*>(this) + field_offset.Int32Value();
   Atomic<int64_t>* atomic_addr = reinterpret_cast<Atomic<int64_t>*>(raw_addr);
-  return atomic_addr->CompareAndSetStrongSequentiallyConsistent(old_value, new_value);
+  bool success = atomic_addr->CompareAndSetStrongSequentiallyConsistent(old_value, new_value);
+  if (kTransactionActive && success) {
+    Runtime::Current()->GetClassLinker()->RecordWriteField64(
+        this, field_offset, old_value, /*is_volatile=*/ true);
+  }
+  return success;
 }
 
 /*
@@ -626,13 +618,10 @@ inline void Object::SetFieldObjectWithoutWriteBarrier(MemberOffset field_offset,
                                                       ObjPtr<Object> new_value) {
   VerifyTransaction<kTransactionActive, kCheckTransaction>();
   if (kTransactionActive) {
-    ObjPtr<Object> obj;
-    if (kIsVolatile) {
-      obj = GetFieldObjectVolatile<Object>(field_offset);
-    } else {
-      obj = GetFieldObject<Object>(field_offset);
-    }
-    Runtime::Current()->RecordWriteFieldReference(this, field_offset, obj, true);
+    ObjPtr<Object> old_value =
+        GetFieldObject<Object, kVerifyFlags, kWithReadBarrier, kIsVolatile>(field_offset);
+    Runtime::Current()->GetClassLinker()->RecordWriteFieldReference(
+        this, field_offset, old_value, kIsVolatile);
   }
   Verify<kVerifyFlags>();
   VerifyWrite<kVerifyFlags>(new_value);
@@ -685,14 +674,16 @@ inline bool Object::CasFieldObjectWithoutWriteBarrier(MemberOffset field_offset,
                                                       std::memory_order memory_order) {
   VerifyTransaction<kTransactionActive, kCheckTransaction>();
   VerifyCAS<kVerifyFlags>(new_value, old_value);
-  if (kTransactionActive) {
-    Runtime::Current()->RecordWriteFieldReference(this, field_offset, old_value, true);
-  }
   uint32_t old_ref(PtrCompression<kPoisonHeapReferences, Object>::Compress(old_value));
   uint32_t new_ref(PtrCompression<kPoisonHeapReferences, Object>::Compress(new_value));
   uint8_t* raw_addr = reinterpret_cast<uint8_t*>(this) + field_offset.Int32Value();
   Atomic<uint32_t>* atomic_addr = reinterpret_cast<Atomic<uint32_t>*>(raw_addr);
-  return atomic_addr->CompareAndSet(old_ref, new_ref, mode, memory_order);
+  bool success = atomic_addr->CompareAndSet(old_ref, new_ref, mode, memory_order);
+  if (kTransactionActive && success) {
+    Runtime::Current()->GetClassLinker()->RecordWriteFieldReference(
+        this, field_offset, old_value, /*is_volatile=*/ true);
+  }
+  return success;
 }
 
 template<bool kTransactionActive, bool kCheckTransaction, VerifyObjectFlags kVerifyFlags>
@@ -731,7 +722,8 @@ inline ObjPtr<Object> Object::CompareAndExchangeFieldObject(MemberOffset field_o
   }
   if (success) {
     if (kTransactionActive) {
-      Runtime::Current()->RecordWriteFieldReference(this, field_offset, witness_value, true);
+      Runtime::Current()->GetClassLinker()->RecordWriteFieldReference(
+          this, field_offset, witness_value, /*is_volatile=*/ true);
     }
     WriteBarrier::ForFieldWrite(this, field_offset, new_value);
   }
@@ -755,7 +747,8 @@ inline ObjPtr<Object> Object::ExchangeFieldObject(MemberOffset field_offset,
     ReadBarrier::AssertToSpaceInvariant(old_value.Ptr());
   }
   if (kTransactionActive) {
-    Runtime::Current()->RecordWriteFieldReference(this, field_offset, old_value, true);
+    Runtime::Current()->GetClassLinker()->RecordWriteFieldReference(
+        this, field_offset, old_value, /*is_volatile=*/ true);
   }
   WriteBarrier::ForFieldWrite(this, field_offset, new_value);
   VerifyRead<kVerifyFlags>(old_value);
@@ -777,7 +770,8 @@ inline void Object::UpdateFieldBooleanViaAccessor(MemberOffset field_offset,
   if (kTransactionActive) {
     static const bool kIsVolatile = true;
     uint8_t old_value = GetFieldBoolean<kVerifyFlags, kIsVolatile>(field_offset);
-    Runtime::Current()->RecordWriteFieldBoolean(this, field_offset, old_value, kIsVolatile);
+    Runtime::Current()->GetClassLinker()->RecordWriteFieldBoolean(
+        this, field_offset, old_value, kIsVolatile);
   }
   Verify<kVerifyFlags>();
   uint8_t* raw_addr = reinterpret_cast<uint8_t*>(this) + field_offset.Int32Value();
@@ -792,7 +786,8 @@ inline void Object::UpdateFieldByteViaAccessor(MemberOffset field_offset,
   if (kTransactionActive) {
     static const bool kIsVolatile = true;
     int8_t old_value = GetFieldByte<kVerifyFlags, kIsVolatile>(field_offset);
-    Runtime::Current()->RecordWriteFieldByte(this, field_offset, old_value, kIsVolatile);
+    Runtime::Current()->GetClassLinker()->RecordWriteFieldByte(
+        this, field_offset, old_value, kIsVolatile);
   }
   Verify<kVerifyFlags>();
   uint8_t* raw_addr = reinterpret_cast<uint8_t*>(this) + field_offset.Int32Value();
@@ -807,7 +802,8 @@ inline void Object::UpdateFieldCharViaAccessor(MemberOffset field_offset,
   if (kTransactionActive) {
     static const bool kIsVolatile = true;
     uint16_t old_value = GetFieldChar<kVerifyFlags, kIsVolatile>(field_offset);
-    Runtime::Current()->RecordWriteFieldChar(this, field_offset, old_value, kIsVolatile);
+    Runtime::Current()->GetClassLinker()->RecordWriteFieldChar(
+        this, field_offset, old_value, kIsVolatile);
   }
   Verify<kVerifyFlags>();
   uint8_t* raw_addr = reinterpret_cast<uint8_t*>(this) + field_offset.Int32Value();
@@ -822,7 +818,8 @@ inline void Object::UpdateFieldShortViaAccessor(MemberOffset field_offset,
   if (kTransactionActive) {
     static const bool kIsVolatile = true;
     int16_t old_value = GetFieldShort<kVerifyFlags, kIsVolatile>(field_offset);
-    Runtime::Current()->RecordWriteFieldShort(this, field_offset, old_value, kIsVolatile);
+    Runtime::Current()->GetClassLinker()->RecordWriteFieldShort(
+        this, field_offset, old_value, kIsVolatile);
   }
   Verify<kVerifyFlags>();
   uint8_t* raw_addr = reinterpret_cast<uint8_t*>(this) + field_offset.Int32Value();
@@ -837,7 +834,8 @@ inline void Object::UpdateField32ViaAccessor(MemberOffset field_offset,
   if (kTransactionActive) {
     static const bool kIsVolatile = true;
     int32_t old_value = GetField32<kVerifyFlags, kIsVolatile>(field_offset);
-    Runtime::Current()->RecordWriteField32(this, field_offset, old_value, kIsVolatile);
+    Runtime::Current()->GetClassLinker()->RecordWriteField32(
+        this, field_offset, old_value, kIsVolatile);
   }
   Verify<kVerifyFlags>();
   uint8_t* raw_addr = reinterpret_cast<uint8_t*>(this) + field_offset.Int32Value();
@@ -852,7 +850,8 @@ inline void Object::UpdateField64ViaAccessor(MemberOffset field_offset,
   if (kTransactionActive) {
     static const bool kIsVolatile = true;
     int64_t old_value = GetField64<kVerifyFlags, kIsVolatile>(field_offset);
-    Runtime::Current()->RecordWriteField64(this, field_offset, old_value, kIsVolatile);
+    Runtime::Current()->GetClassLinker()->RecordWriteField64(
+        this, field_offset, old_value, kIsVolatile);
   }
   Verify<kVerifyFlags>();
   uint8_t* raw_addr = reinterpret_cast<uint8_t*>(this) + field_offset.Int32Value();
@@ -860,63 +859,38 @@ inline void Object::UpdateField64ViaAccessor(MemberOffset field_offset,
   accessor->Access(addr);
 }
 
-template<bool kIsStatic,
-         VerifyObjectFlags kVerifyFlags,
-         ReadBarrierOption kReadBarrierOption,
-         typename Visitor>
-inline void Object::VisitFieldsReferences(uint32_t ref_offsets, const Visitor& visitor) {
-  if (!kIsStatic && (ref_offsets != mirror::Class::kClassWalkSuper)) {
-    // Instance fields and not the slow-path.
-    uint32_t field_offset = mirror::kObjectHeaderSize;
-    while (ref_offsets != 0) {
-      if ((ref_offsets & 1) != 0) {
-        visitor(this, MemberOffset(field_offset), kIsStatic);
-      }
-      ref_offsets >>= 1;
-      field_offset += sizeof(mirror::HeapReference<mirror::Object>);
+template <VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption, typename Visitor>
+inline void Object::VisitInstanceFieldsReferences(ObjPtr<Class> klass, const Visitor& visitor) {
+  // Using NO_THREAD_SAFETY_ANALYSIS as heap_bitmap_lock_ and mutator_lock_ are
+  // required in shared/exclusive modes in all possible combinations.
+  auto visit_one_word = [&visitor, this](uint32_t field_offset, uint32_t ref_offsets)
+                            NO_THREAD_SAFETY_ANALYSIS {
+                              while (ref_offsets != 0) {
+                                if ((ref_offsets & 1) != 0) {
+                                  visitor(this, MemberOffset(field_offset), /*is_static=*/false);
+                                }
+                                ref_offsets >>= 1;
+                                field_offset += sizeof(HeapReference<Object>);
+                              }
+                            };
+
+  uint32_t ref_offsets = klass->GetReferenceInstanceOffsets<kVerifyFlags>();
+  DCHECK_NE(ref_offsets, 0u) << klass->PrettyDescriptor();
+  if (UNLIKELY((ref_offsets & Class::kVisitReferencesSlowpathMask) != 0)) {
+    if (kIsDebugBuild) {
+      klass->VerifyOverflowReferenceBitmap<kVerifyFlags, kReadBarrierOption>();
+    }
+    uint32_t bitmap_num_words = ref_offsets & ~Class::kVisitReferencesSlowpathMask;
+    uint32_t* overflow_bitmap = reinterpret_cast<uint32_t*>(
+        reinterpret_cast<uint8_t*>(klass.Ptr()) +
+        (klass->GetClassSize<kVerifyFlags>() - bitmap_num_words * sizeof(uint32_t)));
+    for (uint32_t i = 0; i < bitmap_num_words; i++) {
+      visit_one_word(kObjectHeaderSize + i * sizeof(HeapReference<Object>) * 32,
+                     overflow_bitmap[i]);
     }
   } else {
-    // There is no reference offset bitmap. In the non-static case, walk up the class
-    // inheritance hierarchy and find reference offsets the hard way. In the static case, just
-    // consider this class.
-    for (ObjPtr<Class> klass = kIsStatic
-            ? ObjPtr<Class>::DownCast(this)
-            : GetClass<kVerifyFlags, kReadBarrierOption>();
-        klass != nullptr;
-        klass = kIsStatic ? nullptr : klass->GetSuperClass<kVerifyFlags, kReadBarrierOption>()) {
-      const size_t num_reference_fields =
-          kIsStatic ? klass->NumReferenceStaticFields() : klass->NumReferenceInstanceFields();
-      if (num_reference_fields == 0u) {
-        continue;
-      }
-      // Presumably GC can happen when we are cross compiling, it should not cause performance
-      // problems to do pointer size logic.
-      MemberOffset field_offset = kIsStatic
-          ? klass->GetFirstReferenceStaticFieldOffset<kVerifyFlags>(
-              Runtime::Current()->GetClassLinker()->GetImagePointerSize())
-          : klass->GetFirstReferenceInstanceFieldOffset<kVerifyFlags, kReadBarrierOption>();
-      for (size_t i = 0u; i < num_reference_fields; ++i) {
-        // TODO: Do a simpler check?
-        if (field_offset.Uint32Value() != ClassOffset().Uint32Value()) {
-          visitor(this, field_offset, kIsStatic);
-        }
-        field_offset = MemberOffset(field_offset.Uint32Value() +
-                                    sizeof(mirror::HeapReference<mirror::Object>));
-      }
-    }
+    visit_one_word(mirror::kObjectHeaderSize, ref_offsets);
   }
-}
-
-template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption, typename Visitor>
-inline void Object::VisitInstanceFieldsReferences(ObjPtr<Class> klass, const Visitor& visitor) {
-  VisitFieldsReferences<false, kVerifyFlags, kReadBarrierOption>(
-      klass->GetReferenceInstanceOffsets<kVerifyFlags>(), visitor);
-}
-
-template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption, typename Visitor>
-inline void Object::VisitStaticFieldsReferences(ObjPtr<Class> klass, const Visitor& visitor) {
-  DCHECK(!klass->IsTemp<kVerifyFlags>());
-  klass->VisitFieldsReferences<true, kVerifyFlags, kReadBarrierOption>(0, visitor);
 }
 
 template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>

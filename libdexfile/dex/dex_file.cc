@@ -29,9 +29,9 @@
 #include <type_traits>
 
 #include "android-base/stringprintf.h"
-#include "base/enums.h"
 #include "base/hiddenapi_domain.h"
 #include "base/leb128.h"
+#include "base/pointer_size.h"
 #include "base/stl_util.h"
 #include "class_accessor-inl.h"
 #include "compact_dex_file.h"
@@ -463,15 +463,14 @@ const StringId* DexFile::FindStringId(const char* string) const {
   return nullptr;
 }
 
-const TypeId* DexFile::FindTypeId(const char* string) const {
+const TypeId* DexFile::FindTypeId(std::string_view descriptor) const {
   int32_t lo = 0;
   int32_t hi = NumTypeIds() - 1;
   while (hi >= lo) {
     int32_t mid = (hi + lo) / 2;
     const TypeId& type_id = GetTypeId(dex::TypeIndex(mid));
-    const StringId& str_id = GetStringId(type_id.descriptor_idx_);
-    const char* str = GetStringData(str_id);
-    int compare = CompareModifiedUtf8ToModifiedUtf8AsUtf16CodePointValues(string, str);
+    std::string_view mid_descriptor = GetTypeDescriptorView(type_id);
+    int compare = CompareDescriptors(descriptor, mid_descriptor);
     if (compare > 0) {
       lo = mid + 1;
     } else if (compare < 0) {
@@ -571,9 +570,8 @@ bool DexFile::CreateTypeList(std::string_view signature,
         offset++;
       } while (c != ';');
     }
-    // TODO: avoid creating a std::string just to get a 0-terminated char array
-    std::string descriptor(signature.data() + start_offset, offset - start_offset);
-    const TypeId* type_id = FindTypeId(descriptor.c_str());
+    std::string_view descriptor(signature.data() + start_offset, offset - start_offset);
+    const TypeId* type_id = FindTypeId(descriptor);
     if (type_id == nullptr) {
       return false;
     }
@@ -666,7 +664,7 @@ void DexFile::AppendPrettyMethod(uint32_t method_idx,
   const MethodId& method_id = GetMethodId(method_idx);
   const ProtoId* proto_id = with_signature ? &GetProtoId(method_id.proto_idx_) : nullptr;
   if (with_signature) {
-    AppendPrettyDescriptor(StringByTypeIdx(proto_id->return_type_idx_), result);
+    AppendPrettyDescriptor(GetTypeDescriptor(proto_id->return_type_idx_), result);
     result->push_back(' ');
   }
   AppendPrettyDescriptor(GetMethodDeclaringClassDescriptor(method_id), result);
@@ -680,7 +678,7 @@ void DexFile::AppendPrettyMethod(uint32_t method_idx,
       for (uint32_t i = 0u, size = params->Size(); i != size; ++i) {
         result->append(separator);
         separator = ", ";
-        AppendPrettyDescriptor(StringByTypeIdx(params->GetTypeItem(i).type_idx_), result);
+        AppendPrettyDescriptor(GetTypeDescriptor(params->GetTypeItem(i).type_idx_), result);
       }
     }
     result->push_back(')');

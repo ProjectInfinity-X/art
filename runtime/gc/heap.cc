@@ -202,9 +202,17 @@ static constexpr bool kLogAllGCs = false;
 static constexpr size_t kPostForkMaxHeapDurationMS = 2000;
 
 #if defined(__LP64__) || !defined(ADDRESS_SANITIZER)
-// 300 MB (0x12c00000) - (default non-moving space capacity).
-uint8_t* const Heap::kPreferredAllocSpaceBegin =
-    reinterpret_cast<uint8_t*>(300 * MB - kDefaultNonMovingSpaceCapacity);
+// 320 MB (0x14000000) - (default non-moving space capacity).
+// The value is picked to ensure it is aligned to the largest supported PMD
+// size, which is 32mb with a 16k page size on AArch64.
+uint8_t* const Heap::kPreferredAllocSpaceBegin = reinterpret_cast<uint8_t*>(([]() constexpr {
+  constexpr size_t kBegin = 320 * MB - Heap::kDefaultNonMovingSpaceCapacity;
+  constexpr int kMaxPMDSize = (kMaxPageSize / sizeof(uint64_t)) * kMaxPageSize;
+  static_assert(IsAligned<kMaxPMDSize>(kBegin),
+                "kPreferredAllocSpaceBegin should be aligned to the maximum "
+                "supported PMD size.");
+  return kBegin;
+})());
 #else
 #ifdef __ANDROID__
 // For 32-bit Android, use 0x20000000 because asan reserves 0x04000000 - 0x20000000.
@@ -1638,15 +1646,50 @@ void Heap::TrimIndirectReferenceTables(Thread* self) {
 }
 
 void Heap::StartGC(Thread* self, GcCause cause, CollectorType collector_type) {
-  // Need to do this before acquiring the locks since we don't want to get suspended while
-  // holding any locks.
-  ScopedThreadStateChange tsc(self, ThreadState::kWaitingForGcToComplete);
+  // This can be called in either kRunnable or suspended states.
+  // TODO: Consider fixing that?
+  ThreadState old_thread_state = self->GetState();
+  if (old_thread_state == ThreadState::kRunnable) {
+    Locks::mutator_lock_->AssertSharedHeld(self);
+    // Manually inlining the following call breaks thread-safety analysis.
+    StartGCRunnable(self, cause, collector_type);
+    return;
+  }
+  Locks::mutator_lock_->AssertNotHeld(self);
+  self->SetState(ThreadState::kWaitingForGcToComplete);
   MutexLock mu(self, *gc_complete_lock_);
-  // Ensure there is only one GC at a time.
   WaitForGcToCompleteLocked(cause, self);
   collector_type_running_ = collector_type;
   last_gc_cause_ = cause;
   thread_running_gc_ = self;
+  self->SetState(old_thread_state);
+}
+
+void Heap::StartGCRunnable(Thread* self, GcCause cause, CollectorType collector_type) {
+  Locks::mutator_lock_->AssertSharedHeld(self);
+  while (true) {
+    self->TransitionFromRunnableToSuspended(ThreadState::kWaitingForGcToComplete);
+    {
+      MutexLock mu(self, *gc_complete_lock_);
+      // Ensure there is only one GC at a time.
+      WaitForGcToCompleteLocked(cause, self);
+      collector_type_running_ = collector_type;
+      last_gc_cause_ = cause;
+      thread_running_gc_ = self;
+    }
+    // We have to be careful returning to runnable state, since that could cause us to block.
+    // That would be bad, since collector_type_running_ is set, and hence no GC is possible in this
+    // state, allowing deadlock.
+    if (LIKELY(self->TryTransitionFromSuspendedToRunnable())) {
+      return;
+    }
+    {
+      MutexLock mu(self, *gc_complete_lock_);
+      collector_type_running_ = kCollectorTypeNone;
+      thread_running_gc_ = nullptr;
+    }
+    self->TransitionFromSuspendedToRunnable();  // Will handle suspension request and block.
+  }
 }
 
 void Heap::TrimSpaces(Thread* self) {
@@ -1973,15 +2016,16 @@ mirror::Object* Heap::AllocateInternalWithGc(Thread* self,
   // then there is no hope, so we throw OOME.
   collector::GcType tried_type = next_gc_type_;
   if (last_gc < tried_type) {
-    const bool gc_ran = PERFORM_SUSPENDING_OPERATION(
-        CollectGarbageInternal(tried_type, kGcCauseForAlloc, false, starting_gc_num + 1)
-        != collector::kGcTypeNone);
+    VLOG(gc) << "Starting a blocking GC " << kGcCauseForAlloc;
+    PERFORM_SUSPENDING_OPERATION(
+        CollectGarbageInternal(tried_type, kGcCauseForAlloc, false, starting_gc_num + 1));
 
     if ((was_default_allocator && allocator != GetCurrentAllocator()) ||
         (!instrumented && EntrypointsInstrumented())) {
       return nullptr;
     }
-    if (gc_ran && have_reclaimed_enough()) {
+    // Check this even if we didn't actually run a GC; if we didn't someone else probably did.
+    if (have_reclaimed_enough()) {
       mirror::Object* ptr = TryToAllocate<true, false>(self, allocator,
                                                        alloc_size, bytes_allocated,
                                                        usable_size, bytes_tl_bulk_allocated);
@@ -2010,11 +2054,22 @@ mirror::Object* Heap::AllocateInternalWithGc(Thread* self,
   // "GC thrashing", or
   // (b) GC was sufficiently productive (reclaimed min_freed_to_continue bytes) AND allowed us to
   // satisfy the allocation request.
+  bool gc_ran;
+  int gc_attempts = 0;
+  // A requested GC can fail to run because either someone else beat us to it, or because we can't
+  // run a GC in this state. In the latter case, we return quickly. Just try a small number of
+  // times.
+  static constexpr int kMaxGcAttempts = 5;
   do {
     bytes_freed_before = GetBytesFreedEver();
     pre_oome_gc_count_.fetch_add(1, std::memory_order_relaxed);
-    PERFORM_SUSPENDING_OPERATION(
-        CollectGarbageInternal(gc_plan_.back(), kGcCauseForAlloc, true, GC_NUM_ANY));
+    // TODO(b/353333767): Do this only if nobody else beats us to it. If we're having trouble
+    // allocating, probably other threads are in the same boat.
+    starting_gc_num = GetCurrentGcNum();
+    gc_ran = PERFORM_SUSPENDING_OPERATION(
+        CollectGarbageInternal(gc_plan_.back(), kGcCauseForAlloc, true, starting_gc_num + 1) !=
+        collector::kGcTypeNone);
+    ++gc_attempts;
     if ((was_default_allocator && allocator != GetCurrentAllocator()) ||
         (!instrumented && EntrypointsInstrumented())) {
       return nullptr;
@@ -2065,7 +2120,8 @@ mirror::Object* Heap::AllocateInternalWithGc(Thread* self,
     // issue, and there is no other thread allocating, GCs will quickly become unsuccessful, and we
     // will stop then. If another thread is allocating aggressively, this may go on for a while,
     // but we are still making progress somewhere.
-  } while (GetBytesFreedEver() - bytes_freed_before > min_freed_to_continue);
+  } while ((!gc_ran && gc_attempts < kMaxGcAttempts) ||
+           GetBytesFreedEver() - bytes_freed_before > min_freed_to_continue);
 #undef PERFORM_SUSPENDING_OPERATION
   // Throw an OOM error.
   {
@@ -2737,7 +2793,7 @@ collector::GcType Heap::CollectGarbageInternal(collector::GcType gc_type,
     // We should not ever become runnable and re-suspend while executing a GC.
     // This would likely cause a deadlock if we acted on a suspension request.
     // TODO: We really want to assert that we don't transition to kRunnable.
-    ScopedAssertNoThreadSuspension("Performing GC");
+    ScopedAssertNoThreadSuspension scoped_assert("Performing GC");
     if (self->IsHandlingStackOverflow()) {
       // If we are throwing a stack overflow error we probably don't have enough remaining stack
       // space to run the GC.
@@ -2748,6 +2804,8 @@ collector::GcType Heap::CollectGarbageInternal(collector::GcType gc_type,
     bool compacting_gc;
     {
       gc_complete_lock_->AssertNotHeld(self);
+      // Already not runnable; just switch suspended states. We remain in a suspended state until
+      // FinishGC(). This avoids the complicated dance in StartGC().
       ScopedThreadStateChange tsc2(self, ThreadState::kWaitingForGcToComplete);
       MutexLock mu(self, *gc_complete_lock_);
       // Ensure there is only one GC at a time.
@@ -2847,6 +2905,7 @@ collector::GcType Heap::CollectGarbageInternal(collector::GcType gc_type,
     old_native_bytes_allocated_.store(GetNativeBytes());
     LogGC(gc_cause, collector);
     FinishGC(self, gc_type);
+    // We're suspended up to this point.
   }
   // Actually enqueue all cleared references. Do this after the GC has officially finished since
   // otherwise we can deadlock.
@@ -3605,53 +3664,52 @@ void Heap::RosAllocVerification(TimingLogger* timings, const char* name) {
 collector::GcType Heap::WaitForGcToComplete(GcCause cause, Thread* self) {
   ScopedThreadStateChange tsc(self, ThreadState::kWaitingForGcToComplete);
   MutexLock mu(self, *gc_complete_lock_);
-  return WaitForGcToCompleteLocked(cause, self);
+  return WaitForGcToCompleteLocked(cause, self, /* only_one= */ true);
 }
 
-collector::GcType Heap::WaitForGcToCompleteLocked(GcCause cause, Thread* self) {
+collector::GcType Heap::WaitForGcToCompleteLocked(GcCause cause, Thread* self, bool only_one) {
   gc_complete_cond_->CheckSafeToWait(self);
   collector::GcType last_gc_type = collector::kGcTypeNone;
   GcCause last_gc_cause = kGcCauseNone;
-  uint64_t wait_start = NanoTime();
-  while (collector_type_running_ != kCollectorTypeNone) {
-    if (!task_processor_->IsRunningThread(self)) {
-      // The current thread is about to wait for a currently running
-      // collection to finish. If the waiting thread is not the heap
-      // task daemon thread, the currently running collection is
-      // considered as a blocking GC.
-      running_collection_is_blocking_ = true;
-      VLOG(gc) << "Waiting for a blocking GC " << cause;
+  if (collector_type_running_ != kCollectorTypeNone) {
+    uint64_t wait_start = NanoTime();
+    uint32_t starting_gc_num = GetCurrentGcNum();
+    while (collector_type_running_ != kCollectorTypeNone &&
+           (!only_one || GCNumberLt(GetCurrentGcNum(), starting_gc_num + 1))) {
+      if (!task_processor_->IsRunningThread(self)) {
+        // The current thread is about to wait for a currently running
+        // collection to finish. If the waiting thread is not the heap
+        // task daemon thread, the currently running collection is
+        // considered as a blocking GC.
+        running_collection_is_blocking_ = true;
+        VLOG(gc) << "Waiting for a blocking GC " << cause;
+      }
+      SCOPED_TRACE << "GC: Wait For Completion " << cause;
+      // We must wait, change thread state then sleep on gc_complete_cond_;
+      gc_complete_cond_->Wait(self);
+      last_gc_type = last_gc_type_;
+      last_gc_cause = last_gc_cause_;
     }
-    SCOPED_TRACE << "GC: Wait For Completion " << cause;
-    // We must wait, change thread state then sleep on gc_complete_cond_;
-    gc_complete_cond_->Wait(self);
-    last_gc_type = last_gc_type_;
-    last_gc_cause = last_gc_cause_;
-  }
-  uint64_t wait_time = NanoTime() - wait_start;
-  total_wait_time_ += wait_time;
-  if (wait_time > long_pause_log_threshold_) {
-    LOG(INFO) << "WaitForGcToComplete blocked " << cause << " on " << last_gc_cause << " for "
-              << PrettyDuration(wait_time);
+    uint64_t wait_time = NanoTime() - wait_start;
+    total_wait_time_ += wait_time;
+    if (wait_time > long_pause_log_threshold_) {
+      LOG(INFO) << "WaitForGcToComplete blocked " << cause << " on " << last_gc_cause << " for "
+                << PrettyDuration(wait_time);
+    }
   }
   if (!task_processor_->IsRunningThread(self)) {
     // The current thread is about to run a collection. If the thread
     // is not the heap task daemon thread, it's considered as a
     // blocking GC (i.e., blocking itself).
     running_collection_is_blocking_ = true;
-    // Don't log fake "GC" types that are only used for debugger or hidden APIs. If we log these,
-    // it results in log spam. kGcCauseExplicit is already logged in LogGC, so avoid it here too.
-    if (cause == kGcCauseForAlloc ||
-        cause == kGcCauseDisableMovingGc) {
-      VLOG(gc) << "Starting a blocking GC " << cause;
-    }
   }
+  DCHECK(only_one || collector_type_running_ == kCollectorTypeNone);
   return last_gc_type;
 }
 
 void Heap::DumpForSigQuit(std::ostream& os) {
   os << "Heap: " << GetPercentFree() << "% free, " << PrettySize(GetBytesAllocated()) << "/"
-     << PrettySize(GetTotalMemory());
+     << PrettySize(GetTotalMemory()) << "\n";
   {
     os << "Image spaces:\n";
     ScopedObjectAccess soa(Thread::Current());
@@ -4768,6 +4826,20 @@ std::string Heap::GetForegroundCollectorName() {
   std::ostringstream oss;
   oss << foreground_collector_type_;
   return oss.str();
+}
+
+bool Heap::HasAppImageSpaceFor(const std::string& dex_location) const {
+  ScopedObjectAccess soa(Thread::Current());
+  for (space::ContinuousSpace* space : continuous_spaces_) {
+    // An image space is either a boot image space or an app image space.
+    if (space->IsImageSpace() &&
+        !IsBootImageAddress(space->Begin()) &&
+        (space->AsImageSpace()->GetOatFile()->GetOatDexFiles()[0]->GetDexFileLocation() ==
+              dex_location)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 }  // namespace gc

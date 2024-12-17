@@ -46,6 +46,7 @@ import org.mockito.Mock;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ThreadPoolExecutor;
 
 public class PrimaryDexopterTestBase {
     protected static final String PKG_NAME = "com.example.foo";
@@ -64,12 +65,15 @@ public class PrimaryDexopterTestBase {
     @Mock protected UserManager mUserManager;
     @Mock protected DexUseManagerLocal mDexUseManager;
     @Mock protected StorageManager mStorageManager;
+    @Mock protected DexMetadataHelper.Injector mDexMetadataHelperInjector;
+    @Mock protected ThreadPoolExecutor mReporterExecutor;
     protected PackageState mPkgState;
     protected AndroidPackage mPkg;
     protected PackageUserState mPkgUserStateNotInstalled;
     protected PackageUserState mPkgUserStateInstalled;
     protected CancellationSignal mCancellationSignal;
     protected Config mConfig;
+    protected DexMetadataHelper mDexMetadataHelper;
 
     @Before
     public void setUp() throws Exception {
@@ -79,6 +83,7 @@ public class PrimaryDexopterTestBase {
         mPkg = mPkgState.getAndroidPackage();
         mCancellationSignal = new CancellationSignal();
         mConfig = new Config();
+        mDexMetadataHelper = new DexMetadataHelper(mDexMetadataHelperInjector);
 
         lenient().when(mInjector.getArtd()).thenReturn(mArtd);
         lenient().when(mInjector.isSystemUiPackage(any())).thenReturn(false);
@@ -88,6 +93,9 @@ public class PrimaryDexopterTestBase {
         lenient().when(mInjector.getStorageManager()).thenReturn(mStorageManager);
         lenient().when(mInjector.getArtVersion()).thenReturn(ART_VERSION);
         lenient().when(mInjector.getConfig()).thenReturn(mConfig);
+        lenient().when(mInjector.getReporterExecutor()).thenReturn(mReporterExecutor);
+        lenient().when(mInjector.getDexMetadataHelper()).thenReturn(mDexMetadataHelper);
+        lenient().when(mInjector.isPreReboot()).thenReturn(false);
 
         lenient()
                 .when(SystemProperties.get("dalvik.vm.systemuicompilerfilter"))

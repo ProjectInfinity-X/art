@@ -17,8 +17,8 @@
 #ifndef ART_COMPILER_OPTIMIZING_CODE_GENERATOR_ARM_VIXL_H_
 #define ART_COMPILER_OPTIMIZING_CODE_GENERATOR_ARM_VIXL_H_
 
-#include "base/enums.h"
 #include "base/macros.h"
+#include "base/pointer_size.h"
 #include "class_root.h"
 #include "code_generator.h"
 #include "common_arm.h"
@@ -29,9 +29,10 @@
 #include "parallel_move_resolver.h"
 #include "utils/arm/assembler_arm_vixl.h"
 
-// TODO(VIXL): make vixl clean wrt -Wshadow.
+// TODO(VIXL): Make VIXL compile cleanly with -Wshadow, -Wdeprecated-declarations.
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wshadow"
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 #include "aarch32/constants-aarch32.h"
 #include "aarch32/instructions-aarch32.h"
 #include "aarch32/macro-assembler-aarch32.h"
@@ -120,10 +121,16 @@ using VIXLInt32Literal = vixl::aarch32::Literal<int32_t>;
 using VIXLUInt32Literal = vixl::aarch32::Literal<uint32_t>;
 
 #define UNIMPLEMENTED_INTRINSIC_LIST_ARM(V)                                \
+  V(MathSignumFloat)                                                       \
+  V(MathSignumDouble)                                                      \
+  V(MathCopySignFloat)                                                     \
+  V(MathCopySignDouble)                                                    \
   V(MathRoundDouble) /* Could be done by changing rounding mode, maybe? */ \
   V(UnsafeCASLong)   /* High register pressure */                          \
   V(SystemArrayCopyChar)                                                   \
   V(LongDivideUnsigned)                                                    \
+  V(IntegerRemainderUnsigned)                                              \
+  V(LongRemainderUnsigned)                                                 \
   V(CRC32Update)                                                           \
   V(CRC32UpdateBytes)                                                      \
   V(CRC32UpdateByteBuffer)                                                 \
@@ -159,12 +166,14 @@ using VIXLUInt32Literal = vixl::aarch32::Literal<uint32_t>;
   V(StringBuilderToString)                                                 \
   V(SystemArrayCopyByte)                                                   \
   V(SystemArrayCopyInt)                                                    \
+  V(UnsafeArrayBaseOffset)                                                 \
   /* 1.8 */                                                                \
   V(MathFmaDouble)                                                         \
   V(MathFmaFloat)                                                          \
   V(MethodHandleInvokeExact)                                               \
   V(MethodHandleInvoke)                                                    \
   /* OpenJDK 11 */                                                         \
+  V(JdkUnsafeArrayBaseOffset)                                              \
   V(JdkUnsafeCASLong) /* High register pressure */                         \
   V(JdkUnsafeCompareAndSetLong)
 
@@ -381,13 +390,12 @@ class LocationsBuilderARMVIXL : public HGraphVisitor {
   void HandleInvoke(HInvoke* invoke);
   void HandleBitwiseOperation(HBinaryOperation* operation, Opcode opcode);
   void HandleCondition(HCondition* condition);
-  void HandleIntegerRotate(LocationSummary* locations);
-  void HandleLongRotate(LocationSummary* locations);
   void HandleShift(HBinaryOperation* operation);
   void HandleFieldSet(HInstruction* instruction,
                       const FieldInfo& field_info,
                       WriteBarrierKind write_barrier_kind);
   void HandleFieldGet(HInstruction* instruction, const FieldInfo& field_info);
+  void HandleRotate(HBinaryOperation* rotate);
 
   Location ArithmeticZeroOrFpuRegister(HInstruction* input);
   Location ArmEncodableConstantOrRegister(HInstruction* constant, Opcode opcode);
@@ -437,8 +445,9 @@ class InstructionCodeGeneratorARMVIXL : public InstructionCodeGenerator {
   void GenerateAddLongConst(Location out, Location first, uint64_t value);
   void HandleBitwiseOperation(HBinaryOperation* operation);
   void HandleCondition(HCondition* condition);
-  void HandleIntegerRotate(HRor* ror);
-  void HandleLongRotate(HRor* ror);
+  void HandleIntegerRotate(HBinaryOperation* rotate);
+  void HandleLongRotate(HBinaryOperation* rotate);
+  void HandleRotate(HBinaryOperation* rotate);
   void HandleShift(HBinaryOperation* operation);
 
   void GenerateWideAtomicStore(vixl::aarch32::Register addr,
@@ -684,7 +693,7 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
   void MoveFromReturnRegister(Location trg, DataType::Type type) override;
 
   // The PcRelativePatchInfo is used for PC-relative addressing of methods/strings/types,
-  // whether through .data.bimg.rel.ro, .bss, or directly in the boot image.
+  // whether through .data.img.rel.ro, .bss, or directly in the boot image.
   //
   // The PC-relative address is loaded with three instructions,
   // MOVW+MOVT to load the offset to base_reg and then ADD base_reg, PC. The offset
@@ -695,9 +704,9 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
     PcRelativePatchInfo(const DexFile* dex_file, uint32_t off_or_idx)
         : target_dex_file(dex_file), offset_or_index(off_or_idx) { }
 
-    // Target dex file or null for .data.bmig.rel.ro patches.
+    // Target dex file or null for boot image .data.img.rel.ro patches.
     const DexFile* target_dex_file;
-    // Either the boot image offset (to write to .data.bmig.rel.ro) or string/type/method index.
+    // Either the boot image offset (to write to .data.img.rel.ro) or string/type/method index.
     uint32_t offset_or_index;
     vixl::aarch32::Label movw_label;
     vixl::aarch32::Label movt_label;
@@ -709,6 +718,7 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
   PcRelativePatchInfo* NewBootImageMethodPatch(MethodReference target_method);
   PcRelativePatchInfo* NewMethodBssEntryPatch(MethodReference target_method);
   PcRelativePatchInfo* NewBootImageTypePatch(const DexFile& dex_file, dex::TypeIndex type_index);
+  PcRelativePatchInfo* NewAppImageTypePatch(const DexFile& dex_file, dex::TypeIndex type_index);
   PcRelativePatchInfo* NewTypeBssEntryPatch(HLoadClass* load_class);
   PcRelativePatchInfo* NewBootImageStringPatch(const DexFile& dex_file,
                                                dex::StringIndex string_index);
@@ -1029,6 +1039,8 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
   ArenaDeque<PcRelativePatchInfo> method_bss_entry_patches_;
   // PC-relative type patch info for kBootImageLinkTimePcRelative.
   ArenaDeque<PcRelativePatchInfo> boot_image_type_patches_;
+  // PC-relative type patch info for kAppImageRelRo.
+  ArenaDeque<PcRelativePatchInfo> app_image_type_patches_;
   // PC-relative type patch info for kBssEntry.
   ArenaDeque<PcRelativePatchInfo> type_bss_entry_patches_;
   // PC-relative public type patch info for kBssEntryPublic.

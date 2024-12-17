@@ -57,7 +57,7 @@ static constexpr uint32_t kAccSkipHiddenapiChecks =   0x00100000;  // class (run
 // declaring-class/super-class are to be considered obsolete, meaning they should not be used by.
 static constexpr uint32_t kAccObsoleteObject =        0x00200000;  // class (runtime)
 // Set during boot image compilation to indicate that the class is
-// not initialized at compile tile and not in the list of preloaded classes.
+// not initialized at compile time and not in the list of preloaded classes.
 static constexpr uint32_t kAccInBootImageAndNotInPreloadedClasses = 0x00400000;  // class (runtime)
 // This is set by the class linker during LinkInterfaceMethods. It is used by a method
 // to represent that it was copied from its declaring class into another class.
@@ -111,7 +111,7 @@ static constexpr uint32_t kAccCorePlatformApi =       0x20000000;  // field, met
 // Uses an intrinsic bit but that's OK as intrinsics are always in the boot image.
 static constexpr uint32_t kAccMemorySharedMethod =       0x40000000;
 
-// Set by the compiler driver when compiling boot classes with instrinsic methods.
+// Set by the compiler driver when compiling boot classes with intrinsic methods.
 static constexpr uint32_t kAccIntrinsic  =            0x80000000;  // method (runtime)
 
 // Special runtime-only flags.

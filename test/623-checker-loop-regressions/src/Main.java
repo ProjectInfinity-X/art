@@ -290,7 +290,7 @@ public class Main {
   /// CHECK-NOT: VecLoad
   //
   /// CHECK-START-ARM64: void Main.string2Bytes(char[], java.lang.String) loop_optimization (after)
-  /// CHECK-IF:     hasIsaFeature("sve")
+  /// CHECK-IF:     hasIsaFeature("sve") and os.environ.get('ART_FORCE_TRY_PREDICATED_SIMD') == 'true'
   //
   //      TODO: Support CharAt for SVE.
   ///     CHECK-NOT: VecLoad
@@ -314,7 +314,7 @@ public class Main {
   /// CHECK-NOT: VecLoad
 
   /// CHECK-START-ARM64: void Main.$noinline$stringToShorts(short[], java.lang.String) loop_optimization (after)
-  /// CHECK-IF:     hasIsaFeature("sve")
+  /// CHECK-IF:     hasIsaFeature("sve") and os.environ.get('ART_FORCE_TRY_PREDICATED_SIMD') == 'true'
   //
   //      TODO: Support CharAt for SVE.
   ///     CHECK-NOT: VecLoad
@@ -368,7 +368,7 @@ public class Main {
   //
   /// CHECK-START-ARM64: void Main.oneBoth(short[], char[]) loop_optimization (after)
   /// CHECK-DAG: <<One:i\d+>>  IntConstant 1                             loop:none
-  /// CHECK-IF:     hasIsaFeature("sve")
+  /// CHECK-IF:     hasIsaFeature("sve") and os.environ.get('ART_FORCE_TRY_PREDICATED_SIMD') == 'true'
   //
   ///     CHECK-DAG: <<Repl:d\d+>>  VecReplicateScalar [<<One>>,{{j\d+}}]               loop:none
   ///     CHECK-DAG: <<LoopP:j\d+>> VecPredWhile                                        loop:<<Loop:B\d+>> outer_loop:none
@@ -423,7 +423,7 @@ public class Main {
   //
   /// CHECK-START-ARM64: void Main.typeConv(byte[], byte[]) loop_optimization (after)
   /// CHECK-DAG: <<One:i\d+>>  IntConstant 1                         loop:none
-  /// CHECK-IF:     hasIsaFeature("sve")
+  /// CHECK-IF:     hasIsaFeature("sve") and os.environ.get('ART_FORCE_TRY_PREDICATED_SIMD') == 'true'
   //
   ///     CHECK-DAG: <<Repl:d\d+>>  VecReplicateScalar [<<One>>,{{j\d+}}]           loop:none
   ///     CHECK-DAG: <<LoopP:j\d+>> VecPredWhile                                    loop:<<Loop1:B\d+>> outer_loop:none
@@ -765,7 +765,7 @@ public class Main {
   /// CHECK-DAG:       VecStore
   //
   /// CHECK-START-ARM64: int Main.testSADAndSet(int[], int[], int[]) loop_optimization (after)
-  /// CHECK-IF:     hasIsaFeature("sve")
+  /// CHECK-IF:     hasIsaFeature("sve") and os.environ.get('ART_FORCE_TRY_PREDICATED_SIMD') == 'true'
   //
   //      VecSADAccumulate is not supported for SVE.
   ///     CHECK-NOT:       VecSADAccumulate
@@ -793,7 +793,7 @@ public class Main {
   /// CHECK-DAG:       VecSADAccumulate
   //
   /// CHECK-START-ARM64: int Main.testSADAndSAD(int[], int[]) loop_optimization (after)
-  /// CHECK-IF:     hasIsaFeature("sve")
+  /// CHECK-IF:     hasIsaFeature("sve") and os.environ.get('ART_FORCE_TRY_PREDICATED_SIMD') == 'true'
   //
   //      VecSADAccumulate is not supported for SVE.
   ///     CHECK-NOT:       VecSADAccumulate
@@ -860,7 +860,7 @@ public class Main {
   /// CHECK-DAG:       VecSADAccumulate
   //
   /// CHECK-START-ARM64: int Main.testSADAndSADExtraAbs0(int[], int[]) loop_optimization (after)
-  /// CHECK-IF:     hasIsaFeature("sve")
+  /// CHECK-IF:     hasIsaFeature("sve") and os.environ.get('ART_FORCE_TRY_PREDICATED_SIMD') == 'true'
   //
   //      VecSADAccumulate is not supported for SVE.
   ///     CHECK-NOT:       VecSADAccumulate
@@ -894,7 +894,7 @@ public class Main {
   /// CHECK-DAG:       VecSADAccumulate
   //
   /// CHECK-START-ARM64: int Main.testSADAndSADExtraAbs1(int[], int[]) loop_optimization (after)
-  /// CHECK-IF:     hasIsaFeature("sve")
+  /// CHECK-IF:     hasIsaFeature("sve") and os.environ.get('ART_FORCE_TRY_PREDICATED_SIMD') == 'true'
   //
   //      VecSADAccumulate is not supported for SVE.
   ///     CHECK-NOT:       VecSADAccumulate
@@ -923,7 +923,7 @@ public class Main {
   // Idioms common sub-expression bug: SAD and DotProd combined.
   //
   /// CHECK-START-ARM64: int Main.testSADAndDotProdCombined0(byte[], byte[]) loop_optimization (after)
-  /// CHECK-IF:     hasIsaFeature("sve")
+  /// CHECK-IF:     hasIsaFeature("sve") and os.environ.get('ART_FORCE_TRY_PREDICATED_SIMD') == 'true'
   //
   //      VecSADAccumulate is not supported for SVE.
   ///     CHECK-NOT:       VecSADAccumulate
@@ -951,7 +951,7 @@ public class Main {
 
   // Idioms common sub-expression bug: SAD and DotProd combined (reversed order).
   /// CHECK-START-ARM64: int Main.testSADAndDotProdCombined1(byte[], byte[]) loop_optimization (after)
-  /// CHECK-IF:     hasIsaFeature("sve")
+  /// CHECK-IF:     hasIsaFeature("sve") and os.environ.get('ART_FORCE_TRY_PREDICATED_SIMD') == 'true'
   //
   //      VecSADAccumulate is not supported for SVE.
   ///     CHECK-NOT:       VecSADAccumulate
@@ -975,6 +975,39 @@ public class Main {
       s1 += temp1;
     }
     return s0 + s1;
+  }
+
+  // Regression test for the case, where a loop is vectorized in predicated mode, and there is
+  // a disambiguation scalar loop added. Make sure that the set, which records instructions
+  // inserted outside of new loops, is not reset until the full vectorization process has
+  // happened.
+  //
+  // Based on void android.util.Spline$MonotoneCubicSpline.<init>(float[], float[]).
+  //
+  /// CHECK-START-ARM64: void Main.$noinline$testExternalSetForLoopWithDisambiguation(int[], int[]) loop_optimization (after)
+  /// CHECK-IF:     hasIsaFeature("sve") and os.environ.get('ART_FORCE_TRY_PREDICATED_SIMD') == 'true'
+  //
+  ///     CHECK-DAG: <<Pred:j\d+>>    VecPredSetAll                          loop:none
+  ///     CHECK-DAG:                  VecReplicateScalar [{{i\d+}},<<Pred>>] loop:none
+  //
+  /// CHECK-ELSE:
+  //
+  ///     CHECK-DAG:                  VecReplicateScalar                     loop:none
+  //
+  /// CHECK-FI:
+  //
+  // Vector loop.
+  /// CHECK-DAG:       Phi                    loop:<<VectorLoop:B\d+>> outer_loop:none
+  /// CHECK-DAG:       VecLoad                loop:<<VectorLoop>>      outer_loop:none
+  //
+  // Backup scalar loop.
+  /// CHECK-DAG:       Phi                    loop:<<ScalarLoop:B\d+>> outer_loop:none
+  /// CHECK-DAG:       ArrayGet               loop:<<ScalarLoop>>      outer_loop:none
+  public static void $noinline$testExternalSetForLoopWithDisambiguation(int[] d, int[] m) {
+    m[0] = d[0];
+    for (int i = 1; i < m.length; i++) {
+      m[i] = (d[i - 1] + d[i]) * 53;
+    }
   }
 
   public static final int ARRAY_SIZE = 512;
@@ -1252,6 +1285,17 @@ public class Main {
         byte[] b_a = createAndInitByteArray(1);
         byte[] b_b = createAndInitByteArray(2);
         expectEquals(1278, testSADAndDotProdCombined1(b_a, b_b));
+    }
+    {
+        int[] i_a = createAndInitIntArray(1);
+        int[] i_b = createAndInitIntArray(2);
+        $noinline$testExternalSetForLoopWithDisambiguation(i_a, i_b);
+
+        int sum = 0;
+        for (int i = 0; i < i_b.length; i++) {
+          sum += i_b[i];
+        }
+        expectEquals(-13839413, sum);
     }
 
     System.out.println("passed");

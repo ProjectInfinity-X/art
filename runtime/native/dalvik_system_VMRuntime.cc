@@ -32,7 +32,7 @@ extern "C" void android_set_application_target_sdk_version(uint32_t version);
 #include "android-base/properties.h"
 #include "arch/instruction_set.h"
 #include "art_method-inl.h"
-#include "base/enums.h"
+#include "base/pointer_size.h"
 #include "base/sdk_version.h"
 #include "class_linker-inl.h"
 #include "class_loader_context.h"
@@ -536,6 +536,11 @@ static jobject VMRuntime_getBaseApkOptimizationInfo(JNIEnv* env, [[maybe_unused]
   return env->NewObject(cls.get(), ctor, j_compiler_filter.get(), j_compilation_reason.get());
 }
 
+static jlong VMRuntime_getFullGcCount([[maybe_unused]] JNIEnv* env, [[maybe_unused]] jclass klass) {
+  metrics::ArtMetrics* metrics = GetMetrics();
+  return metrics->FullGcCount()->Value();
+}
+
 static JNINativeMethod gMethods[] = {
   FAST_NATIVE_METHOD(VMRuntime, addressOf, "(Ljava/lang/Object;)J"),
   NATIVE_METHOD(VMRuntime, bootClassPath, "()Ljava/lang/String;"),
@@ -587,6 +592,7 @@ static JNINativeMethod gMethods[] = {
   NATIVE_METHOD(VMRuntime, isValidClassLoaderContext, "(Ljava/lang/String;)Z"),
   NATIVE_METHOD(VMRuntime, getBaseApkOptimizationInfo,
       "()Ldalvik/system/DexFile$OptimizationInfo;"),
+  NATIVE_METHOD(VMRuntime, getFullGcCount, "()J"),
 };
 
 void register_dalvik_system_VMRuntime(JNIEnv* env) {

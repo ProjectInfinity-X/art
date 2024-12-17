@@ -25,15 +25,16 @@
 
 #include "assembler_arm64.h"
 #include "base/arena_containers.h"
-#include "base/enums.h"
 #include "base/macros.h"
+#include "base/pointer_size.h"
 #include "offsets.h"
 #include "utils/assembler.h"
 #include "utils/jni_macro_assembler.h"
 
-// TODO(VIXL): Make VIXL compile with -Wshadow.
+// TODO(VIXL): Make VIXL compile cleanly with -Wshadow, -Wdeprecated-declarations.
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wshadow"
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 #include "aarch64/macro-assembler-aarch64.h"
 #pragma GCC diagnostic pop
 

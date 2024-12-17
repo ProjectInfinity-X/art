@@ -26,15 +26,20 @@ service artd /apex/com.android.art/bin/artd
 # Same as above, but for Pre-reboot Dexopt. It runs in a chroot environment that
 # is set up by dexopt_chroot_setup. It's a lazy service that is started and
 # stopped dynamically as needed.
-service artd_pre_reboot /apex/com.android.art/bin/art_exec --chroot=/mnt/pre_reboot_dexopt -- /apex/com.android.art/bin/artd --pre-reboot
+# The path to the artd binary may be overridden by art_exec.
+service artd_pre_reboot /apex/com.android.art/bin/art_exec \
+        --chroot=/mnt/pre_reboot_dexopt/chroot \
+        --process-name-suffix="Pre-reboot Dexopt chroot" \
+        -- \
+        /apex/com.android.art/bin/artd \
+        --pre-reboot
     interface aidl artd_pre_reboot
     disabled  # Prevents the service from automatically starting at boot.
     oneshot  # Prevents the service from automatically restarting each time it is stopped.
     class core
     user artd
     group artd
-    capabilities DAC_OVERRIDE DAC_READ_SEARCH FOWNER CHOWN SYS_CHROOT
-    seclabel u:r:artd:s0
+    capabilities DAC_OVERRIDE DAC_READ_SEARCH FOWNER CHOWN SYS_CHROOT SYS_ADMIN
 
 # A service that sets up the chroot environment for Pre-reboot Dexopt. See
 # art/dexopt_chroot_setup/README.md. It's a lazy service that is started and
@@ -46,6 +51,7 @@ service dexopt_chroot_setup /apex/com.android.art/bin/dexopt_chroot_setup
     class core
     user artd
     group artd
+    capabilities DAC_OVERRIDE DAC_READ_SEARCH SYS_CHROOT SYS_ADMIN
 
 # Run at boot in Android U and later.
 service art_boot /apex/com.android.art/bin/art_boot

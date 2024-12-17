@@ -23,17 +23,11 @@ package {
     // to get the below license kinds:
     //   SPDX-license-identifier-Apache-2.0
     default_applicable_licenses: ["art_license"],
-}
-
-soong_config_module_type_import {
-    from: "art/build/SoongConfig.bp",
-    module_types: [
-        "art_module_cc_defaults",
-    ],
+    default_team: "trendy_team_art_performance",
 }
 
 // Properties common to `art_test_defaults` and `art_standalone_test_defaults`.
-art_module_cc_defaults {
+cc_defaults {
     name: "art_test_common_defaults",
     defaults: ["art_defaults"],
 
@@ -67,24 +61,12 @@ art_module_cc_defaults {
     },
 }
 
-art_module_cc_defaults {
+cc_defaults {
     name: "art_test_defaults",
     defaults: [
         "art_test_common_defaults",
     ],
     host_supported: true,
-    soong_config_variables: {
-        source_build: {
-            target: {
-                android: {
-                    test_for: [
-                        "com.android.art",
-                        "com.android.art.debug",
-                    ],
-                },
-            },
-        },
-    },
     target: {
         // The following set of relative_install_paths installs the library in a
         // location that will be available as java.library.path in run tests.
@@ -102,6 +84,12 @@ art_module_cc_defaults {
         },
         android_x86_64: {
             relative_install_path: "art/x86_64",
+        },
+        android: {
+            test_for: [
+                "com.android.art",
+                "com.android.art.debug",
+            ],
         },
     },
     // Tests aren't generally included in any APEX, but this is necessary to
@@ -122,6 +110,12 @@ art_cc_defaults {
     name: "art_test_internal_library_defaults",
     defaults: ["art_test_defaults"],
     target: {
+        android: {
+            test_for: [
+                "com.android.art",
+                "com.android.art.debug",
+            ],
+        },
         android_arm: {
             relative_install_path: "com.android.art/lib",
         },
@@ -147,10 +141,17 @@ filegroup {
 }
 
 // Test configuration template for standalone ART gtests on target (not bundled with the ART APEX)
-// which are part of CTS.
+// which are part of CTS and MCTS.
 filegroup {
     name: "art-gtests-target-standalone-cts-template",
     srcs: ["art-gtests-target-standalone-cts-template.xml"],
+}
+
+// Test configuration template for standalone ART gtests on target (not bundled with the ART APEX)
+// which don't support multilib.
+filegroup {
+    name: "art-gtests-target-standalone-non-multilib-template",
+    srcs: ["art-gtests-target-standalone-non-multilib-template.xml"],
 }
 
 // Test configuration template for standalone ART gtests run with a boot image on target (not
@@ -158,6 +159,19 @@ filegroup {
 filegroup {
     name: "art-gtests-target-standalone-with-boot-image-template",
     srcs: ["art-gtests-target-standalone-with-boot-image-template.xml"],
+}
+
+// Version script for `art_standalone_test_defaults`.
+filegroup {
+    name: "art-standalone-test-version",
+    srcs: ["art-standalone-test-version.map"],
+}
+
+// Version script for `art_standalone_gtest_defaults`. In particular, it adds
+// libsigchain's libc.so interceptors.
+filegroup {
+    name: "art-standalone-gtest-version",
+    srcs: ["art-standalone-gtest-version.map"],
 }
 
 // When soong builds the tests in a sandbox, the targets of symlinks
@@ -178,10 +192,27 @@ filegroup {
     ],
 }
 
+cc_library_static {
+    name: "standalone_test_lib_check",
+    srcs: ["standalone_test_lib_check.cc"],
+    header_libs: ["art_libartbase_headers"],
+    static_libs: [
+        "libbase",
+        "libelf",
+        "libgmock",
+        "libgtest",
+    ],
+}
+
+// Defaults for tests that can run using atest against an ART APEX installed on
+// any supported platform. These tests can only depend on NDK libraries from
+// platform and exported module libraries. Any other libraries must be pushed
+// with the test or linked statically.
 art_cc_defaults {
     name: "art_standalone_test_defaults",
     defaults: [
         "art_test_common_defaults",
+        "elfutils_transitive_defaults", // For libelf
     ],
     // Standalone ART gtests are only supported on device for now.
     // TODO: Add support for host standalone ART gtests. Note that they should not differ much
@@ -194,9 +225,10 @@ art_cc_defaults {
 
     // Support multilib variants (using different suffix per sub-architecture),
     // which is needed on build targets with secondary architectures, as the
-    // CTS/MTS/etc test suite packaging logic flattens all test artifacts into a
-    // single `testcases` directory. Also, there is CI testing that expects
-    // 64-bit multilib test suites to work for 32-bit devices (b/233550842).
+    // CTS/MCTS/MTS/etc. test suite packaging logic may flatten all test artifacts
+    // into a single `testcases` directory. Also, there is CI testing that
+    // expects 64-bit multilib test suites to work for 32-bit devices
+    // (b/233550842).
     compile_multilib: "both",
     multilib: {
         lib32: {
@@ -206,6 +238,27 @@ art_cc_defaults {
             suffix: "64",
         },
     },
+
+    min_sdk_version: "31", // Same as the ART APEX.
+
+    // Link libc++ statically to avoid needing the system libc++.so, which may
+    // be incompatible. The linker exports symbols from an executable that are
+    // referenced in the .dynsym tables of shared object dependencies, so use a
+    // version script to restrict exports. The version script is needed for
+    // hiding symbols from libc++ (either libc++_static.a or vaguely-linked
+    // symbols in other object files) and from other libraries, such as libbase.
+    stl: "libc++_static",
+    version_script: ":art-standalone-test-version",
+
+    // Make standalone tests check their own NEEDED dependencies for disallowed
+    // libraries. Add standalone_test_lib_check and its dependencies, except
+    // libgtest which is expected to be added by the tests.
+    whole_static_libs: [
+        "libbase",
+        "libelf",
+        "libgmock",
+        "standalone_test_lib_check",
+    ],
 }
 
 // Properties common to `art_gtest_defaults` and `art_standalone_gtest_defaults`.
@@ -214,22 +267,13 @@ art_cc_defaults {
     // These really are gtests, but the gtest library comes from `libart(d)-gtest.so`.
     gtest: false,
 
-    shared_libs: [
-        // `libnativeloader` must be shared, otherwise host gtests can't load libraries from
-        // "art_common/out/host", which is present in `libnativeloader` RUNPATH.
-        // TODO(b/247108425): modify gtests RUNPATH so that `libnativeloader` can be static linked.
-        "libnativeloader",
-
-        // `libart(d)` (`art/runtime/jni/java_vm_ext.cc`) and `libnativehelper`
-        // (`libnativehelper/JniInvocation.c`) define symbols with the same name
-        // (e.g. `JNI_GetDefaultJavaVMInitArgs`).
-        // `JavaVmExtTest#*` tests require `libart(d)` implementation of these symbols.
-        // At the moment `libart(d)` is linked statically (through `libart(d)-gtest`)
-        // and these symbols are correctly resolved to `libart(d)`.
-        // If `libnativehelper` and `libart(d)` are both linked dynamically,
-        // `libart(d)` must be specified in shared_libs list before `libnativehelper`,
-        // so that its symbols have precedence over `libnativehelper`.
-        "libnativehelper",
+    header_libs: [
+        "libnativeloader-headers",
+        // The full libnativehelper library has wrappers for the JNI APIs (e.g.
+        // `JNI_CreateJavaVM`) that are implemented in libart(d), so it
+        // shouldn't be linked into the tests where libart(d) is linked
+        // statically.
+        "libnativehelper_header_only",
     ],
     target: {
         android: {
@@ -239,6 +283,12 @@ art_cc_defaults {
                 "libstatspull",
                 "libstatssocket",
                 "heapprofd_client_api",
+            ],
+        },
+        host: {
+            cflags: [
+                "-fsanitize-address-use-after-return=never",
+                "-Wno-unused-command-line-argument",
             ],
         },
         linux: {
@@ -257,10 +307,17 @@ art_cc_defaults {
                 "-Wno-missing-noreturn",
             ],
         },
-        host: {
-            cflags: [
-                "-fsanitize-address-use-after-return=never",
-                "-Wno-unused-command-line-argument",
+        // Library search path needed for running host tests in CI (from testcases directory).
+        linux_glibc_x86: {
+            ldflags: [
+                "-Wl,-rpath,$ORIGIN/../../art_common/out/host/linux-x86/lib",
+                "-Wl,--enable-new-dtags",
+            ],
+        },
+        linux_glibc_x86_64: {
+            ldflags: [
+                "-Wl,-rpath,$ORIGIN/../../art_common/out/host/linux-x86/lib64",
+                "-Wl,--enable-new-dtags",
             ],
         },
     },
@@ -325,15 +382,7 @@ art_cc_defaults {
     static_libs: [
         "libart-gtest",
     ],
-    // Reduce test executable size by disabling automatic export of static lib symbols.
-    // Don't use --exclude-libs=ALL, because it breaks tests under ASAN by hiding __asan* symbols.
-    ldflags: [
-        "-Wl,--exclude-libs=libart-gtest.a",
-    ],
-    test_for: [
-        "com.android.art",
-        "com.android.art.debug",
-    ],
+    version_script: ":art-standalone-gtest-version",
 }
 
 art_cc_defaults {
@@ -450,7 +499,7 @@ filegroup {
 }
 
 // Same as `art-run-test-target-template`, but contains additional
-// options to also make the test part of ART CTS.
+// options to also make the test part of CTS and MCTS.
 filegroup {
     name: "art-run-test-target-cts-template",
     srcs: [
@@ -909,6 +958,7 @@ cc_defaults {
         "720-thread-priority/thread_priority.cc",
         "800-smali/jni.cc",
         "817-hiddenapi/test_native.cc",
+        "855-native/throws_exception.cc",
         "909-attach-agent/disallow_debugging.cc",
         "993-breakpoints-non-debuggable/native_attach_agent.cc",
         "1001-app-image-regions/app_image_regions.cc",
@@ -927,6 +977,7 @@ cc_defaults {
         "2246-trace-v2/dump_trace.cc",
         "2262-miranda-methods/jni_invoke.cc",
         "2270-mh-internal-hiddenapi-use/mh-internal-hidden-api.cc",
+        "2275-pthread-name/native_getname.cc",
         "common/runtime_state.cc",
         "common/stack_inspect.cc",
     ],
@@ -1279,11 +1330,6 @@ java_library {
 
 art_cc_test {
     name: "ArtGtestsTargetInstallApex",
-    defaults: [
-        // Enable only in source builds, where com.android.art.testing is
-        // available.
-        "art_module_source_build_defaults",
-    ],
     data: [
         // We need the ART testing apex, which contains all gtest binaries.
         // Note that due to build system and linker constraints the gtests must be in the apex.
@@ -1316,11 +1362,6 @@ art_cc_test {
 
 art_cc_test {
     name: "ArtGtestsTargetChroot",
-    defaults: [
-        // Enable only in source builds, where com.android.art.testing is
-        // available.
-        "art_module_source_build_defaults",
-    ],
     data: [
         // We need the ART testing apex, which contains all gtest binaries.
         // Note that due to build system and linker constraints the gtests must be in the apex.

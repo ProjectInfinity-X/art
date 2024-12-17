@@ -109,6 +109,22 @@ public class AhatClassObj extends AhatInstance {
   }
 
   /**
+   * Returns the value of a static field of this class. Returns null if the
+   * field value is null, or the field couldn't be found.
+   *
+   * @param fieldName the name of the static field to get the value of
+   * @return the field value
+   */
+  public Value getStaticField(String fieldName) {
+    for (FieldValue field : mStaticFieldValues) {
+      if (fieldName.equals(field.name)) {
+        return field.value;
+      }
+    }
+    return null;
+  }
+
+  /**
    * Returns the fields of instances of this class.
    * Does not include fields from the super class of this class.
    *
@@ -144,6 +160,23 @@ public class AhatClassObj extends AhatInstance {
 
   @Override public boolean isClassObj() {
     return true;
+  }
+
+  /**
+   * Returns true if this is a subclass of another class with the given name.
+   *
+   * @param className the name of the class to check for subclass
+   * @return true if this is a subclass of another class with the given name
+   */
+  public boolean isSubClassOf(String className) {
+    AhatClassObj cls = this;
+    while (cls != null) {
+      if (className.equals(cls.getName())) {
+        return true;
+      }
+      cls = cls.getSuperClassObj();
+    }
+    return false;
   }
 
   @Override public AhatClassObj asClassObj() {

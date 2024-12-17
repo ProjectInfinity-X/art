@@ -593,6 +593,23 @@ void* NativeBridgeGetTrampoline2(
   return callbacks->getTrampoline(handle, name, shorty, len);
 }
 
+void* NativeBridgeGetTrampolineForFunctionPointer(const void* method,
+                                                  const char* shorty,
+                                                  uint32_t len,
+                                                  JNICallType jni_call_type) {
+  if (!NativeBridgeInitialized()) {
+    return nullptr;
+  }
+
+  if (isCompatibleWith(CRITICAL_NATIVE_SUPPORT_VERSION)) {
+    return callbacks->getTrampolineForFunctionPointer(method, shorty, len, jni_call_type);
+  } else {
+    ALOGE("not compatible with version %d, getTrampolineFnPtrWithJNICallType() isn't invoked",
+          CRITICAL_NATIVE_SUPPORT_VERSION);
+    return nullptr;
+  }
+}
+
 bool NativeBridgeIsSupported(const char* libpath) {
   if (NativeBridgeInitialized()) {
     return callbacks->isSupported(libpath);
@@ -648,19 +665,6 @@ bool NativeBridgeIsPathSupported(const char* path) {
       ALOGE("not compatible with version %d, cannot check via library path", NAMESPACE_VERSION);
     }
   }
-  return false;
-}
-
-bool NativeBridgeInitAnonymousNamespace(const char* public_ns_sonames,
-                                        const char* anon_ns_library_path) {
-  if (NativeBridgeInitialized()) {
-    if (isCompatibleWith(NAMESPACE_VERSION)) {
-      return callbacks->initAnonymousNamespace(public_ns_sonames, anon_ns_library_path);
-    } else {
-      ALOGE("not compatible with version %d, cannot init namespace", NAMESPACE_VERSION);
-    }
-  }
-
   return false;
 }
 

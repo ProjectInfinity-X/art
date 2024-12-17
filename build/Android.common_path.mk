@@ -17,21 +17,6 @@
 ifndef ART_ANDROID_COMMON_PATH_MK
 ART_ANDROID_COMMON_PATH_MK := true
 
-# We cannot build things that require host core images from prebuilts, because
-# they aren't present there. Set up a variable to skip all build rules that
-# relate to them, because `m checkbuild` complains on rules with nonexisting
-# dependencies, even if they won't get called.
-# TODO(b/172480617): Remove this when ART sources are no longer in platform manifests.
-ifeq (true,$(ART_MODULE_BUILD_FROM_SOURCE))
-  my_art_module_source_build := true
-else ifeq (false,$(ART_MODULE_BUILD_FROM_SOURCE))
-  my_art_module_source_build := false
-else
-  $(error ART_MODULE_BUILD_FROM_SOURCE is neither true nor false - mk file ordering problem?)
-endif
-
-ifeq (true,$(my_art_module_source_build))
-
 include art/build/Android.common.mk
 include art/build/Android.common_build.mk
 
@@ -147,14 +132,12 @@ TESTING_ART_APEX := com.android.art.testing
 RUNTIME_APEX := com.android.runtime
 CONSCRYPT_APEX := com.android.conscrypt
 I18N_APEX := com.android.i18n
-STATSD_APEX := com.android.os.statsd
+STATSD_APEX := art_fake_com.android.os.statsd
 TZDATA_APEX := com.android.tzdata
 
 # A phony file to create the ICU data file for host.
 HOST_I18N_DATA := $(HOST_OUT)/$(I18N_APEX)/timestamp
 # A phony file to create the tz data file for host.
 HOST_TZDATA_DATA := $(HOST_OUT)/$(TZDATA_APEX)/timestamp
-
-endif # ifeq (true,$(my_art_module_source_build))
 
 endif # ART_ANDROID_COMMON_PATH_MK

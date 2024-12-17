@@ -48,6 +48,15 @@ extern "C" void* native_bridge7_getTrampoline2(void* /* handle */,
   return nullptr;
 }
 
+extern "C" void* native_bridge7_getTrampolineForFunctionPointer(
+    const void* /* method */,
+    const char* /* shorty */,
+    uint32_t /* len */,
+    android::JNICallType jni_call_type) {
+  android::SetGetTrampolineFnPtrCalled(jni_call_type);
+  return nullptr;
+}
+
 extern "C" bool native_bridge7_isSupported(const char* /* libpath */) { return false; }
 
 extern "C" const struct android::NativeBridgeRuntimeValues* native_bridge7_getAppEnv(
@@ -69,11 +78,6 @@ extern "C" int native_bridge7_unloadLibrary(void* /* handle */) { return 0; }
 extern "C" const char* native_bridge7_getError() { return nullptr; }
 
 extern "C" bool native_bridge7_isPathSupported(const char* /* path */) { return true; }
-
-extern "C" bool native_bridge7_initAnonymousNamespace(const char* /* public_ns_sonames */,
-                                                      const char* /* anon_ns_library_path */) {
-  return true;
-}
 
 extern "C" android::native_bridge_namespace_t* native_bridge7_createNamespace(
     const char* /* name */,
@@ -123,7 +127,7 @@ android::NativeBridgeCallbacks NativeBridgeItf{
     .unloadLibrary = &native_bridge7_unloadLibrary,
     .getError = &native_bridge7_getError,
     .isPathSupported = &native_bridge7_isPathSupported,
-    .initAnonymousNamespace = &native_bridge7_initAnonymousNamespace,
+    .unused_initAnonymousNamespace = nullptr,
     .createNamespace = &native_bridge7_createNamespace,
     .linkNamespaces = &native_bridge7_linkNamespaces,
     .loadLibraryExt = &native_bridge7_loadLibraryExt,
@@ -134,4 +138,6 @@ android::NativeBridgeCallbacks NativeBridgeItf{
     // v6
     &native_bridge7_preZygoteFork,
     // v7
-    &native_bridge7_getTrampoline2};
+    &native_bridge7_getTrampoline2,
+    &native_bridge7_getTrampolineForFunctionPointer,
+};

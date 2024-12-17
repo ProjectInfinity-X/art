@@ -36,16 +36,16 @@ import com.android.server.pm.pkg.AndroidPackage;
 import com.android.server.pm.pkg.PackageState;
 
 import java.util.List;
+import java.util.concurrent.Executor;
 
 /** @hide */
 @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
 public class SecondaryDexopter extends Dexopter<CheckedSecondaryDexInfo> {
-    private static final String TAG = ArtManagerLocal.TAG;
-
     public SecondaryDexopter(@NonNull Context context, @NonNull Config config,
-            @NonNull PackageState pkgState, @NonNull AndroidPackage pkg,
+            Executor reporterExecutor, @NonNull PackageState pkgState, @NonNull AndroidPackage pkg,
             @NonNull DexoptParams params, @NonNull CancellationSignal cancellationSignal) {
-        this(new Injector(context, config), pkgState, pkg, params, cancellationSignal);
+        this(new Injector(context, config, reporterExecutor), pkgState, pkg, params,
+                cancellationSignal);
     }
 
     @VisibleForTesting
@@ -53,6 +53,10 @@ public class SecondaryDexopter extends Dexopter<CheckedSecondaryDexInfo> {
             @NonNull AndroidPackage pkg, @NonNull DexoptParams params,
             @NonNull CancellationSignal cancellationSignal) {
         super(injector, pkgState, pkg, params, cancellationSignal);
+        if (pkgState.getAppId() < 0) {
+            throw new IllegalStateException(
+                    "Package '" + pkgState.getPackageName() + "' has invalid app ID");
+        }
     }
 
     @Override
@@ -82,6 +86,12 @@ public class SecondaryDexopter extends Dexopter<CheckedSecondaryDexInfo> {
     @Override
     protected boolean isDexFilePublic(@NonNull CheckedSecondaryDexInfo dexInfo) {
         return dexInfo.fileVisibility() == FileVisibility.OTHER_READABLE;
+    }
+
+    @Override
+    protected boolean isDexFileFound(@NonNull CheckedSecondaryDexInfo dexInfo) {
+        // `getDexInfoList` has already excluded non-existing dex files.
+        return true;
     }
 
     @Override
@@ -116,8 +126,8 @@ public class SecondaryDexopter extends Dexopter<CheckedSecondaryDexInfo> {
 
     @Override
     @NonNull
-    protected ProfilePath buildRefProfilePath(@NonNull CheckedSecondaryDexInfo dexInfo) {
-        return AidlUtils.buildProfilePathForSecondaryRef(dexInfo.dexPath());
+    protected ProfilePath buildRefProfilePathAsInput(@NonNull CheckedSecondaryDexInfo dexInfo) {
+        return AidlUtils.buildProfilePathForSecondaryRefAsInput(dexInfo.dexPath());
     }
 
     @Override
@@ -125,7 +135,8 @@ public class SecondaryDexopter extends Dexopter<CheckedSecondaryDexInfo> {
     protected OutputProfile buildOutputProfile(
             @NonNull CheckedSecondaryDexInfo dexInfo, boolean isPublic) {
         int uid = getUid(dexInfo);
-        return AidlUtils.buildOutputProfileForSecondary(dexInfo.dexPath(), uid, uid, isPublic);
+        return AidlUtils.buildOutputProfileForSecondary(
+                dexInfo.dexPath(), uid, uid, isPublic, mInjector.isPreReboot());
     }
 
     @Override

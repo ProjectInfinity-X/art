@@ -14,11 +14,11 @@
 
 package {
     default_applicable_licenses: ["art_license"],
+    default_team: "trendy_team_art_mainline",
 }
 
 java_defaults {
     name: "odsign_e2e_tests_defaults",
-    defaults: ["art_module_source_build_java_defaults"],
     srcs: ["test-src/**/*.java"],
     libs: ["tradefed"],
     static_libs: [
@@ -39,6 +39,7 @@ java_test_host {
     test_suites: [
         "general-tests",
         "cts",
+        "mcts-art",
     ],
 }
 
@@ -76,7 +77,6 @@ cc_library_shared {
 
 android_test_helper_app {
     name: "odsign_e2e_test_app",
-    defaults: ["art_module_source_build_java_defaults"],
     manifest: "AndroidManifest.xml",
     srcs: ["src/**/*.java"],
     jni_libs: [

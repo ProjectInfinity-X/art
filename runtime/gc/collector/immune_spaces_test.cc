@@ -17,6 +17,7 @@
 #include <sys/mman.h>
 
 #include "base/common_art_test.h"
+#include "base/pointer_size.h"
 #include "base/utils.h"
 #include "gc/collector/immune_spaces.h"
 #include "gc/space/image_space.h"
@@ -36,6 +37,11 @@ class FakeOatFile : public OatFile {
   FakeOatFile(uint8_t* begin, uint8_t* end) : OatFile("Location", /*executable=*/ false) {
     begin_ = begin;
     end_ = end;
+  }
+
+  const uint8_t* ComputeElfBegin(std::string* error_msg) const override {
+    *error_msg = "Not applicable";
+    return nullptr;
   }
 };
 
@@ -151,7 +157,7 @@ class ImmuneSpacesTest : public CommonArtTest {
         /*boot_image_size=*/ 0u,
         /*boot_image_component_count=*/ 0u,
         /*boot_image_checksum=*/ 0u,
-        /*pointer_size=*/ sizeof(void*));
+        /*pointer_size=*/ kRuntimePointerSize);
     return new FakeImageSpace(std::move(image_map),
                               std::move(live_bitmap),
                               std::move(oat_file),

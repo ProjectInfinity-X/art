@@ -25,6 +25,7 @@ package {
     // to get the below license kinds:
     //   SPDX-license-identifier-Apache-2.0
     default_applicable_licenses: ["art_license"],
+    default_team: "trendy_team_art_performance",
 }
 
 JIT_DEBUG_REGISTER_CODE_LDFLAGS = [
@@ -300,7 +301,6 @@ cc_defaults {
         "interpreter/interpreter_cache.cc",
         "interpreter/interpreter_common.cc",
         "interpreter/interpreter_switch_impl0.cc",
-        "interpreter/interpreter_switch_impl1.cc",
         "interpreter/lock_count_data.cc",
         "interpreter/shadow_frame.cc",
         "interpreter/unstarted_runtime.cc",
@@ -378,10 +378,10 @@ cc_defaults {
         "native_stack_dump.cc",
         "non_debuggable_classes.cc",
         "nterp_helpers.cc",
-        "oat/aot_class_linker.cc",
         "oat/elf_file.cc",
         "oat/image.cc",
         "oat/index_bss_mapping.cc",
+        "oat/jni_stub_hash_map.cc",
         "oat/oat.cc",
         "oat/oat_file.cc",
         "oat/oat_file_assistant.cc",
@@ -406,7 +406,6 @@ cc_defaults {
         "runtime_intrinsics.cc",
         "runtime_options.cc",
         "scoped_thread_state_change.cc",
-        "sdk_checker.cc",
         "signal_catcher.cc",
         "stack.cc",
         "startup_completed_task.cc",
@@ -416,7 +415,7 @@ cc_defaults {
         "thread_pool.cc",
         "ti/agent.cc",
         "trace.cc",
-        "transaction.cc",
+        "trace_profile.cc",
         "var_handles.cc",
         "vdex_file.cc",
         "verifier/class_verifier.cc",
@@ -619,8 +618,25 @@ cc_defaults {
     ],
 }
 
+// A defaults to link libunwindstack statically with necessary dependencies,
+// where all non-NDK dependencies are static as well.
+cc_defaults {
+    name: "art_libunwindstack_static_defaults",
+    whole_static_libs: [
+        "libunwindstack",
+        "libbase",
+        "liblzma",
+    ],
+    shared_libs: [
+        "liblog",
+    ],
+}
+
 cc_defaults {
     name: "libart_static_base_defaults",
+    defaults: [
+        "art_libunwindstack_static_defaults",
+    ],
     whole_static_libs: [
         "libartpalette",
         "libbase",
@@ -628,12 +644,8 @@ cc_defaults {
         "liblz4",
         "liblzma", // libelffile dependency; must be repeated here since it's a static lib.
         "libnativebridge",
+        "libnativeloader",
         "libodrstatslog",
-        "libunwindstack",
-    ],
-    exclude_static_libs: [
-        // This library comes from the static version of libunwindstack.
-        "libz",
     ],
     target: {
         host: {
@@ -642,62 +654,74 @@ cc_defaults {
                 "-Wno-unused-command-line-argument",
             ],
         },
-        bionic: {
+        android: {
             whole_static_libs: [
-                "libasync_safe", // libunwindstack dependency on Bionic.
+                "libPlatformProperties", // libnativeloader dependency.
             ],
         },
     },
 }
 
 cc_defaults {
-    name: "libart_static_defaults",
+    name: "libart-runtime_static_defaults",
     defaults: [
         "libart_static_base_defaults",
         "libartbase_static_defaults",
         "libdexfile_static_defaults",
         "libdexfile_support_static_defaults",
         "libprofile_static_defaults",
-        "libart-compiler_static_defaults",
     ],
     whole_static_libs: [
         "libart-runtime",
         "libelffile",
         "libsigchain_fake",
-        "libnativeloader",
     ],
 }
 
 cc_defaults {
-    name: "libartd_static_defaults",
+    name: "libartd-runtime_static_defaults",
     defaults: [
         "libart_static_base_defaults",
         "libartbased_static_defaults",
         "libdexfiled_static_defaults",
         "libdexfiled_support_static_defaults",
         "libprofiled_static_defaults",
-        "libartd-compiler_static_defaults",
     ],
     whole_static_libs: [
         "libartd-runtime",
         "libelffiled",
         "libsigchain_fake",
-        "libnativeloader",
     ],
 }
 
-// libart_static_defaults for standalone gtests.
-// Doesn't link libsigchain_fake.
-// Uses libart-(runtime/compiler)-for-test instead of libart-runtime/compiler.
 cc_defaults {
-    name: "libart-for-test_static_defaults",
+    name: "libart_static_defaults",
+    defaults: [
+        "libart-runtime_static_defaults",
+        "libart-compiler_static_defaults",
+    ],
+}
+
+cc_defaults {
+    name: "libartd_static_defaults",
+    defaults: [
+        "libartd-runtime_static_defaults",
+        "libartd-compiler_static_defaults",
+    ],
+}
+
+// libart-runtime_static_defaults for standalone gtests.
+// Doesn't link libsigchain_fake/libnativeloader (see art_gtest_common_defaults
+// in test/Android.bp for explanation).
+// Uses libart-runtime-for-test instead of libart-runtime.
+cc_defaults {
+    name: "libart-runtime-for-test_static_defaults",
     defaults: [
         "libart_static_base_defaults",
         "libartbase_static_defaults",
         "libdexfile_static_defaults",
         "libdexfile_support_static_defaults",
         "libprofile_static_defaults",
-        "libart-compiler-for-test_static_defaults",
     ],
     whole_static_libs: [
         "libart-runtime-for-test",
@@ -705,19 +729,19 @@ cc_defaults {
     ],
 }
 
-// libartd_static_defaults for gtests.
-// Doesn't link libsigchain_fake.
+// libartd-runtime_static_defaults for gtests.
+// Doesn't link libsigchain_fake/libnativeloader (see art_gtest_common_defaults
+// in test/Android.bp for explanation).
 // Note that `libartd-runtime-for-test` is not required here, because `libartd-runtime`
 // doesn't use LTO.
 cc_defaults {
-    name: "libartd-for-test_static_defaults",
+    name: "libartd-runtime-for-test_static_defaults",
     defaults: [
         "libart_static_base_defaults",
         "libartbased_static_defaults",
         "libdexfiled_static_defaults",
         "libdexfiled_support_static_defaults",
         "libprofiled_static_defaults",
-        "libartd-compiler-for-test_static_defaults",
     ],
     whole_static_libs: [
         "libartd-runtime",
@@ -759,6 +783,7 @@ gensrcs {
         "thread.h",
         "thread_state.h",
         "trace.h",
+        "trace_profile.h",
         "verifier/verifier_enums.h",
     ],
     output_extension: "operator_out.cc",
@@ -932,7 +957,7 @@ art_cc_library_static {
     defaults: [
         "libart-runtime-gtest-defaults",
         "libart-gtest-defaults",
-        "libart-for-test_static_defaults",
+        "libart-runtime-for-test_static_defaults",
     ],
 }
 
@@ -942,7 +967,7 @@ art_cc_library_static {
         "art_debug_defaults",
         "libart-runtime-gtest-defaults",
         "libart-gtest-defaults",
-        "libartd-for-test_static_defaults",
+        "libartd-runtime-for-test_static_defaults",
     ],
 }
 
@@ -958,6 +983,8 @@ art_cc_defaults {
     },
     data: [
         ":art-gtest-jars-AllFields",
+        ":art-gtest-jars-DexVerificationFuzzerFolder",
+        ":art-gtest-jars-ClassVerificationFuzzerFolder",
         ":art-gtest-jars-ErroneousA",
         ":art-gtest-jars-ErroneousB",
         ":art-gtest-jars-ErroneousInit",
@@ -991,7 +1018,6 @@ art_cc_defaults {
         ":art-gtest-jars-StaticLeafMethods",
         ":art-gtest-jars-Statics",
         ":art-gtest-jars-StaticsFromCode",
-        ":art-gtest-jars-Transaction",
         ":art-gtest-jars-VerifierDeps",
         ":art-gtest-jars-VerifierDepsMulti",
         ":art-gtest-jars-XandY",
@@ -1010,7 +1036,6 @@ art_cc_defaults {
         "oat/oat_file_assistant_test.cc",
         "runtime_callbacks_test.cc",
         "subtype_check_test.cc",
-        "transaction_test.cc",
         "verifier/reg_type_test.cc",
     ],
     srcs: [
@@ -1037,6 +1062,7 @@ art_cc_defaults {
         "entrypoints/quick/quick_trampoline_entrypoints_test.cc",
         "entrypoints_order_test.cc",
         "exec_utils_test.cc",
+        "fuzzer_corpus_test.cc",
         "gc/accounting/card_table_test.cc",
         "gc/accounting/mod_union_table_test.cc",
         "gc/accounting/space_bitmap_test.cc",
@@ -1090,14 +1116,10 @@ art_cc_defaults {
         "subtype_check_test.cc",
         "thread_pool_test.cc",
         "thread_test.cc",
-        "transaction_test.cc",
         "two_runtimes_test.cc",
         "vdex_file_test.cc",
         "verifier/method_verifier_test.cc",
         "verifier/reg_type_test.cc",
-    ],
-    shared_libs: [
-        "libunwindstack",
     ],
     static_libs: [
         "libgmock",

@@ -30,8 +30,6 @@ import android.os.Process;
 import android.os.RemoteException;
 import android.os.ServiceSpecificException;
 import android.os.UserHandle;
-import android.text.TextUtils;
-import android.util.Log;
 
 import androidx.annotation.RequiresApi;
 
@@ -40,30 +38,23 @@ import com.android.modules.utils.pm.PackageStateModulesUtils;
 import com.android.server.art.model.ArtFlags;
 import com.android.server.art.model.Config;
 import com.android.server.art.model.DexoptParams;
-import com.android.server.art.model.DexoptResult;
-import com.android.server.pm.PackageManagerLocal;
 import com.android.server.pm.pkg.AndroidPackage;
 import com.android.server.pm.pkg.PackageState;
 
-import dalvik.system.DexFile;
-
-import com.google.auto.value.AutoValue;
-
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.Executor;
 
 /** @hide */
 @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
 public class PrimaryDexopter extends Dexopter<DetailedPrimaryDexInfo> {
-    private static final String TAG = ArtManagerLocal.TAG;
-
     private final int mSharedGid;
 
     public PrimaryDexopter(@NonNull Context context, @NonNull Config config,
-            @NonNull PackageState pkgState, @NonNull AndroidPackage pkg,
+            Executor reporterExecutor, @NonNull PackageState pkgState, @NonNull AndroidPackage pkg,
             @NonNull DexoptParams params, @NonNull CancellationSignal cancellationSignal) {
-        this(new Injector(context, config), pkgState, pkg, params, cancellationSignal);
+        this(new Injector(context, config, reporterExecutor), pkgState, pkg, params,
+                cancellationSignal);
     }
 
     @VisibleForTesting
@@ -72,7 +63,11 @@ public class PrimaryDexopter extends Dexopter<DetailedPrimaryDexInfo> {
             @NonNull CancellationSignal cancellationSignal) {
         super(injector, pkgState, pkg, params, cancellationSignal);
 
-        mSharedGid = UserHandle.getSharedAppGid(pkgState.getAppId());
+        if (pkgState.getAppId() < 0) {
+            mSharedGid = Process.SYSTEM_UID;
+        } else {
+            mSharedGid = UserHandle.getSharedAppGid(pkgState.getAppId());
+        }
         if (mSharedGid < 0) {
             throw new IllegalStateException(
                     String.format("Unable to get shared gid for package '%s' (app ID: %d)",
@@ -117,6 +112,17 @@ public class PrimaryDexopter extends Dexopter<DetailedPrimaryDexInfo> {
     }
 
     @Override
+    protected boolean isDexFileFound(@NonNull DetailedPrimaryDexInfo dexInfo) {
+        try {
+            return mInjector.getArtd().getDexFileVisibility(dexInfo.dexPath())
+                    != FileVisibility.NOT_FOUND;
+        } catch (ServiceSpecificException | RemoteException e) {
+            AsLog.e("Failed to get visibility of " + dexInfo.dexPath(), e);
+            return false;
+        }
+    }
+
+    @Override
     @NonNull
     protected List<ProfilePath> getExternalProfiles(@NonNull DetailedPrimaryDexInfo dexInfo) {
         return PrimaryDexUtils.getExternalProfiles(dexInfo);
@@ -148,16 +154,16 @@ public class PrimaryDexopter extends Dexopter<DetailedPrimaryDexInfo> {
 
     @Override
     @NonNull
-    protected ProfilePath buildRefProfilePath(@NonNull DetailedPrimaryDexInfo dexInfo) {
-        return PrimaryDexUtils.buildRefProfilePath(mPkgState, dexInfo);
+    protected ProfilePath buildRefProfilePathAsInput(@NonNull DetailedPrimaryDexInfo dexInfo) {
+        return PrimaryDexUtils.buildRefProfilePathAsInput(mPkgState, dexInfo);
     }
 
     @Override
     @NonNull
     protected OutputProfile buildOutputProfile(
             @NonNull DetailedPrimaryDexInfo dexInfo, boolean isPublic) {
-        return PrimaryDexUtils.buildOutputProfile(
-                mPkgState, dexInfo, Process.SYSTEM_UID, mSharedGid, isPublic);
+        return PrimaryDexUtils.buildOutputProfile(mPkgState, dexInfo, Process.SYSTEM_UID,
+                mSharedGid, isPublic, mInjector.isPreReboot());
     }
 
     @Override

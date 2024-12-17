@@ -18,7 +18,7 @@
 
 #include "art_field-inl.h"
 #include "art_method-alloc-inl.h"
-#include "base/enums.h"
+#include "base/pointer_size.h"
 #include "class_linker.h"
 #include "common_throws.h"
 #include "dex/dex_file-inl.h"
@@ -496,7 +496,8 @@ bool InvokeMethodImpl(const ScopedObjectAccessAlreadyRunnable& soa,
   if (soa.Self()->IsExceptionPending()) {
     // To abort a transaction we use a fake exception that should never be caught by the bytecode
     // and therefore it makes no sense to wrap it.
-    if (Runtime::Current()->IsTransactionAborted()) {
+    if (Runtime::Current()->IsActiveTransaction() &&
+        Runtime::Current()->GetClassLinker()->IsTransactionAborted()) {
       DCHECK(soa.Self()->GetException()->GetClass()->DescriptorEquals(
                   "Ldalvik/system/TransactionAbortError;"))
           << soa.Self()->GetException()->GetClass()->PrettyDescriptor();

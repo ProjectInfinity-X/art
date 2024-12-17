@@ -118,8 +118,11 @@ void CheckNterpAsmConstants() {
 inline void UpdateHotness(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_) {
   // The hotness we will add to a method when we perform a
   // field/method/class/string lookup.
-  constexpr uint16_t kNterpHotnessLookup = 0xff;
-  method->UpdateCounter(kNterpHotnessLookup);
+  Runtime* runtime = Runtime::Current();
+  bool increase_hotness_for_ui = runtime->GetStartupCompleted() &&
+      runtime->InJankPerceptibleProcessState() &&
+      Thread::Current()->IsJitSensitiveThread();
+  method->UpdateCounter(increase_hotness_for_ui ? 0x6ff : 0xf);
 }
 
 template<typename T>
@@ -313,7 +316,7 @@ static constexpr std::array<uint8_t, 256u> GenerateOpcodeInvokeTypes() {
 
 static constexpr std::array<uint8_t, 256u> kOpcodeInvokeTypes = GenerateOpcodeInvokeTypes();
 
-FLATTEN
+LIBART_PROTECTED FLATTEN
 extern "C" size_t NterpGetMethod(Thread* self, ArtMethod* caller, const uint16_t* dex_pc_ptr)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   UpdateHotness(caller);
@@ -386,6 +389,7 @@ extern "C" size_t NterpGetMethod(Thread* self, ArtMethod* caller, const uint16_t
   }
 }
 
+LIBART_PROTECTED
 extern "C" size_t NterpGetStaticField(Thread* self,
                                       ArtMethod* caller,
                                       const uint16_t* dex_pc_ptr,
@@ -441,6 +445,7 @@ extern "C" size_t NterpGetStaticField(Thread* self,
   }
 }
 
+LIBART_PROTECTED
 extern "C" uint32_t NterpGetInstanceFieldOffset(Thread* self,
                                                 ArtMethod* caller,
                                                 const uint16_t* dex_pc_ptr,
@@ -692,7 +697,10 @@ extern "C" jit::OsrData* NterpHotMethod(ArtMethod* method, uint16_t* dex_pc_ptr,
     DCHECK_EQ(Thread::Current()->GetSharedMethodHotness(), 0u);
     Thread::Current()->ResetSharedMethodHotness();
   } else {
+    // Move the counter to the initial threshold in case we have to re-JIT it.
     method->ResetCounter(runtime->GetJITOptions()->GetWarmupThreshold());
+    // Mark the method as warm for the profile saver.
+    method->SetPreviouslyWarm();
   }
   jit::Jit* jit = runtime->GetJit();
   if (jit != nullptr && jit->UseJitCompilation()) {

@@ -31,7 +31,12 @@ java_binary_host {
     srcs: ["src/main/**/*.java"],
     manifest: "etc/ahat.mf",
     java_resources: ["etc/style.css"],
+    // Use a relaxed version to allow distribution against older runtimes.
+    java_version: "11",
     javacflags: ["-Xdoclint:all/protected"],
+    static_libs: [
+        "guava",
+    ],
 }
 
 // --- ahat-test-dump.jar --------------
@@ -52,4 +57,11 @@ java_test_helper_library {
     device_supported: false,
     name: "ahat-ri-test-dump",
     srcs: ["src/ri-test-dump/**/*.java"],
+}
+
+cc_library_shared {
+    name: "libahat-test-jni",
+    srcs: ["src/test/jni/**/*.cpp"],
+    header_libs: ["jni_headers"],
+    host_supported: true,
 }

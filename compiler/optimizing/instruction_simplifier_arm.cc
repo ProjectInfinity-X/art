@@ -18,6 +18,7 @@
 
 #include "code_generator.h"
 #include "common_arm.h"
+#include "instruction_simplifier.h"
 #include "instruction_simplifier_shared.h"
 #include "mirror/array-inl.h"
 #include "mirror/string.h"
@@ -73,6 +74,7 @@ class InstructionSimplifierArmVisitor final : public HGraphVisitor {
   void VisitArraySet(HArraySet* instruction) override;
   void VisitMul(HMul* instruction) override;
   void VisitOr(HOr* instruction) override;
+  void VisitRol(HRol* instruction) override;
   void VisitShl(HShl* instruction) override;
   void VisitShr(HShr* instruction) override;
   void VisitSub(HSub* instruction) override;
@@ -262,6 +264,11 @@ void InstructionSimplifierArmVisitor::VisitOr(HOr* instruction) {
   }
 }
 
+void InstructionSimplifierArmVisitor::VisitRol(HRol* instruction) {
+  UnfoldRotateLeft(instruction);
+  RecordSimplification();
+}
+
 void InstructionSimplifierArmVisitor::VisitShl(HShl* instruction) {
   if (instruction->InputAt(1)->IsConstant()) {
     TryMergeIntoUsersShifterOperand(instruction);
@@ -278,8 +285,14 @@ void InstructionSimplifierArmVisitor::VisitSub(HSub* instruction) {
   if (IsSubRightSubLeftShl(instruction)) {
     HInstruction* shl = instruction->GetRight()->InputAt(0);
     if (shl->InputAt(1)->IsConstant() && TryReplaceSubSubWithSubAdd(instruction)) {
-      TryMergeIntoUsersShifterOperand(shl);
+      if (TryMergeIntoUsersShifterOperand(shl)) {
+        return;
+      }
     }
+  }
+
+  if (TryMergeWithAnd(instruction)) {
+    return;
   }
 }
 

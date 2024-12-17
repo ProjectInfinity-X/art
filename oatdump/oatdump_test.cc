@@ -32,6 +32,10 @@ INSTANTIATE_TEST_SUITE_P(DynamicOrStatic,
 TEST_P(OatDumpTest, TestNoDumpVmap) {
   TEST_DISABLED_FOR_RISCV64();
   TEST_DISABLED_FOR_ARM_AND_ARM64();
+  // TODO(b/334200225): Temporarily disable this test case for x86 and x86_64
+  // till the disassembler issue is fixed.
+  TEST_DISABLED_FOR_X86();
+  TEST_DISABLED_FOR_X86_64();
   std::string error_msg;
   ASSERT_TRUE(Exec(GetParam(),
                    kArgImage | kArgBcp | kArgIsa,
@@ -97,6 +101,16 @@ TEST_P(OatDumpTest, TestExportDex) {
     ForkAndExecResult res = ForkAndExec({dexdump, "-d", dex_location}, post_fork_fn, &output);
     ASSERT_TRUE(res.StandardSuccess());
   }
+}
+
+TEST_P(OatDumpTest, TestMethodAndOffsetOnly) {
+  TEST_DISABLED_FOR_RISCV64();
+  TEST_DISABLED_FOR_ARM_AND_ARM64();
+  std::string error_msg;
+  ASSERT_TRUE(Exec(GetParam(),
+                   kArgOatBcp | kArgDexBcp | kArgMethodAndOffsetAsJson,
+                   {},
+                   kExpectMethodAndOffsetAsJson));
 }
 
 }  // namespace art

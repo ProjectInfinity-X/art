@@ -30,7 +30,6 @@
 #include "art_method.h"
 #include "base/bit_utils.h"
 #include "base/dchecked_vector.h"
-#include "base/enums.h"
 #include "base/unix_file/fd_file.h"
 #include "base/hash_map.h"
 #include "base/hash_set.h"
@@ -38,6 +37,7 @@
 #include "base/macros.h"
 #include "base/mem_map.h"
 #include "base/os.h"
+#include "base/pointer_size.h"
 #include "base/utils.h"
 #include "class_table.h"
 #include "gc/accounting/space_bitmap.h"
@@ -45,6 +45,7 @@
 #include "lock_word.h"
 #include "mirror/dex_cache.h"
 #include "oat/image.h"
+#include "oat/jni_stub_hash_map.h"
 #include "oat/oat.h"
 #include "oat/oat_file.h"
 #include "obj_ptr.h"
@@ -125,6 +126,15 @@ class ImageWriter final {
       const ImageInfo& image_info = GetImageInfo(oat_index);
       return reinterpret_cast<T*>(image_info.image_begin_ + GetImageOffset(object, oat_index));
     }
+  }
+
+  uint32_t GetGlobalImageOffset(mirror::Object* object) const REQUIRES_SHARED(Locks::mutator_lock_) {
+    DCHECK(object != nullptr);
+    DCHECK(!IsInBootImage(object));
+    size_t oat_index = GetOatIndex(object);
+    const ImageInfo& image_info = GetImageInfo(oat_index);
+    return dchecked_integral_cast<uint32_t>(
+        image_info.image_begin_ + GetImageOffset(object, oat_index) - global_image_begin_);
   }
 
   ArtMethod* GetImageMethodAddress(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_);
@@ -209,6 +219,8 @@ class ImageWriter final {
     kIMTConflictTable,
     // Runtime methods (always clean, do not have a length prefix array).
     kRuntimeMethod,
+    // Methods with unique JNI stubs.
+    kJniStubMethod,
     // Metadata bin for data that is temporary during image lifetime.
     kMetadata,
     kLast = kMetadata,
@@ -450,6 +462,7 @@ class ImageWriter final {
 
   // Creates the contiguous image in memory and adjusts pointers.
   void CopyAndFixupNativeData(size_t oat_index) REQUIRES_SHARED(Locks::mutator_lock_);
+  void CopyAndFixupJniStubMethods(size_t oat_index) REQUIRES_SHARED(Locks::mutator_lock_);
   void CopyAndFixupObjects() REQUIRES_SHARED(Locks::mutator_lock_);
   void CopyAndFixupObject(mirror::Object* obj) REQUIRES_SHARED(Locks::mutator_lock_);
   template <bool kCheckIfDone>
@@ -495,6 +508,10 @@ class ImageWriter final {
                           size_t oat_index)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  // Assign the offset for a method with unique JNI stub.
+  void AssignJniStubMethodOffset(ArtMethod* method, size_t oat_index)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
   // Return true if imt was newly inserted.
   bool TryAssignImTableOffset(ImTable* imt, size_t oat_index) REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -528,6 +545,11 @@ class ImageWriter final {
     size_t oat_index;
     uintptr_t offset;
     NativeObjectRelocationType type;
+  };
+
+  struct JniStubMethodRelocation {
+    size_t oat_index;
+    uintptr_t offset;
   };
 
   NativeObjectRelocation GetNativeRelocation(void* obj) REQUIRES_SHARED(Locks::mutator_lock_);
@@ -596,9 +618,6 @@ class ImageWriter final {
   void CopyAndFixupPointer(void* object, MemberOffset offset, ValueType src_value)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  void ResetNterpFastPathFlags(ArtMethod* copy, ArtMethod* orig)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
   ALWAYS_INLINE
   static bool IsStronglyInternedString(ObjPtr<mirror::String> str)
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -617,6 +636,12 @@ class ImageWriter final {
 
   const CompilerOptions& compiler_options_;
 
+  // Size of pointers on the target architecture.
+  PointerSize target_ptr_size_;
+
+  // Whether to mark non-abstract, non-intrinsic methods as "memory shared methods".
+  bool mark_memory_shared_methods_;
+
   // Cached boot image begin and size. This includes heap, native objects and oat files.
   const uint32_t boot_image_begin_;
   const uint32_t boot_image_size_;
@@ -634,9 +659,6 @@ class ImageWriter final {
   // Oat index map for objects.
   HashMap<mirror::Object*, uint32_t> oat_index_map_;
 
-  // Size of pointers on the target architecture.
-  PointerSize target_ptr_size_;
-
   // Image data indexed by the oat file index.
   dchecked_vector<ImageInfo> image_infos_;
 
@@ -644,6 +666,9 @@ class ImageWriter final {
   // have one entry per art field for convenience. ArtFields are placed right after the end of the
   // image objects (aka sum of bin_slot_sizes_). ArtMethods are placed right after the ArtFields.
   HashMap<void*, NativeObjectRelocation> native_object_relocations_;
+
+  // HashMap used for generating JniStubMethodsSection.
+  JniStubHashMap<std::pair<ArtMethod*, JniStubMethodRelocation>> jni_stub_map_;
 
   // Runtime ArtMethods which aren't reachable from any Class but need to be copied into the image.
   ArtMethod* image_methods_[ImageHeader::kImageMethodsCount];

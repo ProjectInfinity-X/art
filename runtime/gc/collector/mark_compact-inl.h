@@ -27,40 +27,11 @@ namespace collector {
 
 inline void MarkCompact::UpdateClassAfterObjectMap(mirror::Object* obj) {
   mirror::Class* klass = obj->GetClass<kVerifyNone, kWithoutReadBarrier>();
-  // Track a class if it needs walking super-classes for visiting references or
-  // if it's higher in address order than its objects and is in moving space.
-  if (UNLIKELY(
-          (std::less<mirror::Object*>{}(obj, klass) && HasAddress(klass)) ||
-          (klass->GetReferenceInstanceOffsets<kVerifyNone>() == mirror::Class::kClassWalkSuper &&
-           walk_super_class_cache_ != klass))) {
-    // Since this function gets invoked in the compaction pause as well, it is
-    // preferable to store such super class separately rather than updating key
-    // as the latter would require traversing the hierarchy for every object of 'klass'.
-    auto ret1 = class_after_obj_hash_map_.try_emplace(ObjReference::FromMirrorPtr(klass),
-                                                      ObjReference::FromMirrorPtr(obj));
-    if (ret1.second) {
-      if (klass->GetReferenceInstanceOffsets<kVerifyNone>() == mirror::Class::kClassWalkSuper) {
-        // In this case we require traversing through the super class hierarchy
-        // and find the super class at the highest address order.
-        mirror::Class* highest_klass = HasAddress(klass) ? klass : nullptr;
-        for (ObjPtr<mirror::Class> k = klass->GetSuperClass<kVerifyNone, kWithoutReadBarrier>();
-             k != nullptr;
-             k = k->GetSuperClass<kVerifyNone, kWithoutReadBarrier>()) {
-          // TODO: Can we break once we encounter a super class outside the moving space?
-          if (HasAddress(k.Ptr())) {
-            highest_klass = std::max(highest_klass, k.Ptr(), std::less<mirror::Class*>());
-          }
-        }
-        if (highest_klass != nullptr && highest_klass != klass) {
-          auto ret2 = super_class_after_class_hash_map_.try_emplace(
-              ObjReference::FromMirrorPtr(klass), ObjReference::FromMirrorPtr(highest_klass));
-          DCHECK(ret2.second);
-        } else {
-          walk_super_class_cache_ = klass;
-        }
-      }
-    } else if (std::less<mirror::Object*>{}(obj, ret1.first->second.AsMirrorPtr())) {
-      ret1.first->second = ObjReference::FromMirrorPtr(obj);
+  if (UNLIKELY(std::less<mirror::Object*>{}(obj, klass) && HasAddress(klass))) {
+    auto [iter, success] = class_after_obj_map_.try_emplace(ObjReference::FromMirrorPtr(klass),
+                                                            ObjReference::FromMirrorPtr(obj));
+    if (!success && std::less<mirror::Object*>{}(obj, iter->second.AsMirrorPtr())) {
+      iter->second = ObjReference::FromMirrorPtr(obj);
     }
   }
 }
@@ -217,7 +188,16 @@ uint32_t MarkCompact::LiveWordsBitmap<kAlignment>::FindNthLiveWordOffset(size_t 
       }
     }
   }
+  LOG(FATAL) << "Unreachable";
   UNREACHABLE();
+}
+
+inline bool MarkCompact::IsOnAllocStack(mirror::Object* ref) {
+  // Pairs with release fence after allocation-stack push in
+  // Heap::AllocObjectWithAllocator().
+  std::atomic_thread_fence(std::memory_order_acquire);
+  accounting::ObjectStack* stack = heap_->GetAllocationStack();
+  return stack->Contains(ref);
 }
 
 inline void MarkCompact::UpdateRef(mirror::Object* obj,
@@ -265,9 +245,10 @@ inline bool MarkCompact::VerifyRootSingleUpdate(void* root,
                                                 mirror::Object* old_ref,
                                                 const RootInfo& info) {
   // ASAN promotes stack-frames to heap in order to detect
-  // stack-use-after-return issues. So skip using this double-root update
-  // detection on ASAN as well.
-  if (kIsDebugBuild && !kMemoryToolIsAvailable) {
+  // stack-use-after-return issues. And HWASAN has pointers tagged, which makes
+  // it difficult to recognize and prevent stack pointers from being checked.
+  // So skip using double-root update detection on ASANs.
+  if (kIsDebugBuild && !kMemoryToolIsAvailable && !kHwAsanEnabled) {
     void* stack_low_addr = stack_low_addr_;
     void* stack_high_addr = stack_high_addr_;
     if (!HasAddress(old_ref)) {
@@ -278,12 +259,21 @@ inline bool MarkCompact::VerifyRootSingleUpdate(void* root,
       stack_low_addr = self->GetStackEnd();
       stack_high_addr = reinterpret_cast<char*>(stack_low_addr) + self->GetStackSize();
     }
-    if (root < stack_low_addr || root > stack_high_addr) {
-      MutexLock mu(self, lock_);
-      auto ret = updated_roots_->insert(root);
-      DCHECK(ret.second) << "root=" << root << " old_ref=" << old_ref
-                         << " stack_low_addr=" << stack_low_addr
-                         << " stack_high_addr=" << stack_high_addr;
+    if (std::less<void*>{}(root, stack_low_addr) || std::greater<void*>{}(root, stack_high_addr)) {
+      bool inserted;
+      {
+        MutexLock mu(self, lock_);
+        inserted = updated_roots_->insert(root).second;
+      }
+      if (!inserted) {
+        std::ostringstream oss;
+        heap_->DumpSpaces(oss);
+        MemMap::DumpMaps(oss, /* terse= */ true);
+        CHECK(inserted) << "root=" << root << " old_ref=" << old_ref
+                        << " stack_low_addr=" << stack_low_addr
+                        << " stack_high_addr=" << stack_high_addr << " maps\n"
+                        << oss.str();
+      }
     }
     DCHECK(reinterpret_cast<uint8_t*>(old_ref) >= black_allocations_begin_ ||
            live_words_bitmap_->Test(old_ref))

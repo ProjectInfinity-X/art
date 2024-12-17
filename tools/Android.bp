@@ -21,26 +21,13 @@ package {
     // to get the below license kinds:
     //   SPDX-license-identifier-Apache-2.0
     default_applicable_licenses: ["art_license"],
-}
-
-soong_config_module_type_import {
-    from: "art/build/SoongConfig.bp",
-    module_types: [
-        "art_module_cc_genrule",
-    ],
+    default_team: "trendy_team_art_performance",
 }
 
 python_binary_host {
     name: "generate_operator_out",
     srcs: [
         "generate_operator_out.py",
-    ],
-}
-
-soong_config_module_type_import {
-    from: "art/build/SoongConfig.bp",
-    module_types: [
-        "art_module_sh_binary",
     ],
 }
 
@@ -56,19 +43,8 @@ cc_binary {
 }
 
 // Copy the art shell script to the host and target's bin directory
-art_module_sh_binary {
+sh_binary {
     name: "art-script",
-
-    // Disable this script in prebuilt mode since it depends on dalvikvm which
-    // isn't a prebuilt.
-    // TODO(b/172480617): Clean up when sources are gone from the platform tree
-    // and we no longer need to support sources present when prebuilts are used.
-    enabled: false,
-    soong_config_variables: {
-        source_build: {
-            enabled: true,
-        },
-    },
 
     host_supported: true,
     src: "art",
@@ -116,16 +92,9 @@ sh_binary {
     },
 }
 
-art_module_cc_genrule {
+cc_genrule {
     name: "check_cfi",
 
-    // disable the target when prebuilt modules are used
-    enabled: false,
-    soong_config_variables: {
-        source_build: {
-            enabled: true,
-        },
-    },
     tool_files: [
         "check_cfi.py",
     ],

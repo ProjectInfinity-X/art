@@ -20,7 +20,6 @@
 #include "android-base/macros.h"
 #include "instrumentation.h"
 #include "interpreter.h"
-#include "transaction.h"
 
 #include <math.h>
 
@@ -33,10 +32,10 @@
 
 #include "art_field-inl.h"
 #include "art_method-inl.h"
-#include "base/enums.h"
 #include "base/locks.h"
 #include "base/logging.h"
 #include "base/macros.h"
+#include "base/pointer_size.h"
 #include "class_linker-inl.h"
 #include "class_root-inl.h"
 #include "common_dex_operations.h"
@@ -67,7 +66,7 @@
 namespace art HIDDEN {
 namespace interpreter {
 
-void ThrowNullPointerExceptionFromInterpreter()
+EXPORT void ThrowNullPointerExceptionFromInterpreter()
     REQUIRES_SHARED(Locks::mutator_lock_);
 
 static inline void DoMonitorEnter(Thread* self, ShadowFrame* frame, ObjPtr<mirror::Object> ref)
@@ -111,27 +110,17 @@ static inline bool DoMonitorCheckOnExit(Thread* self, ShadowFrame* frame)
   return true;
 }
 
-void AbortTransactionF(Thread* self, const char* fmt, ...)
-    __attribute__((__format__(__printf__, 2, 3)))
-    REQUIRES_SHARED(Locks::mutator_lock_);
-
-void AbortTransactionV(Thread* self, const char* fmt, va_list args)
-    REQUIRES_SHARED(Locks::mutator_lock_);
-
-void RecordArrayElementsInTransaction(ObjPtr<mirror::Array> array, int32_t count)
-    REQUIRES_SHARED(Locks::mutator_lock_);
-
 // Invokes the given method. This is part of the invocation support and is used by DoInvoke,
 // DoFastInvoke and DoInvokeVirtualQuick functions.
 // Returns true on success, otherwise throws an exception and returns false.
 template<bool is_range>
-bool DoCall(ArtMethod* called_method,
-            Thread* self,
-            ShadowFrame& shadow_frame,
-            const Instruction* inst,
-            uint16_t inst_data,
-            bool string_init,
-            JValue* result);
+EXPORT bool DoCall(ArtMethod* called_method,
+                   Thread* self,
+                   ShadowFrame& shadow_frame,
+                   const Instruction* inst,
+                   uint16_t inst_data,
+                   bool string_init,
+                   JValue* result);
 
 // Called by the switch interpreter to know if we can stay in it.
 bool ShouldStayInSwitchInterpreter(ArtMethod* method)
@@ -144,7 +133,8 @@ NO_INLINE bool CheckStackOverflow(Thread* self, size_t frame_size)
 
 // Sends the normal method exit event.
 // Returns true if the events succeeded and false if there is a pending exception.
-template <typename T> bool SendMethodExitEvents(
+template <typename T>
+bool SendMethodExitEvents(
     Thread* self,
     const instrumentation::Instrumentation* instrumentation,
     ShadowFrame& frame,
@@ -160,29 +150,12 @@ NeedsMethodExitEvent(const instrumentation::Instrumentation* ins)
 COLD_ATTR void UnlockHeldMonitors(Thread* self, ShadowFrame* shadow_frame)
     REQUIRES_SHARED(Locks::mutator_lock_);
 
-static inline ALWAYS_INLINE void PerformNonStandardReturn(
-      Thread* self,
-      ShadowFrame& frame,
-      JValue& result,
-      const instrumentation::Instrumentation* instrumentation,
-      uint16_t num_dex_inst,
-      bool unlock_monitors = true) REQUIRES_SHARED(Locks::mutator_lock_) {
-  ObjPtr<mirror::Object> thiz(frame.GetThisObject(num_dex_inst));
-  StackHandleScope<1u> hs(self);
-  if (UNLIKELY(self->IsExceptionPending())) {
-    LOG(WARNING) << "Suppressing exception for non-standard method exit: "
-                 << self->GetException()->Dump();
-    self->ClearException();
-  }
-  if (unlock_monitors) {
-    UnlockHeldMonitors(self, &frame);
-    DoMonitorCheckOnExit(self, &frame);
-  }
-  result = JValue();
-  if (UNLIKELY(NeedsMethodExitEvent(instrumentation))) {
-    SendMethodExitEvents(self, instrumentation, frame, frame.GetMethod(), result);
-  }
-}
+EXPORT
+void PerformNonStandardReturn(Thread* self,
+                              ShadowFrame& frame,
+                              JValue& result,
+                              const instrumentation::Instrumentation* instrumentation,
+                              bool unlock_monitors = true) REQUIRES_SHARED(Locks::mutator_lock_);
 
 // Handles all invoke-XXX/range instructions except for invoke-polymorphic[/range].
 // Returns true on success, otherwise throws an exception and returns false.
@@ -240,18 +213,18 @@ ART_INTRINSICS_LIST(DECLARE_SIGNATURE_POLYMORPHIC_HANDLER)
 
 // Performs a invoke-polymorphic or invoke-polymorphic-range.
 template<bool is_range>
-bool DoInvokePolymorphic(Thread* self,
-                         ShadowFrame& shadow_frame,
-                         const Instruction* inst,
-                         uint16_t inst_data,
-                         JValue* result)
+EXPORT bool DoInvokePolymorphic(Thread* self,
+                                ShadowFrame& shadow_frame,
+                                const Instruction* inst,
+                                uint16_t inst_data,
+                                JValue* result)
     REQUIRES_SHARED(Locks::mutator_lock_);
 
-bool DoInvokeCustom(Thread* self,
-                    ShadowFrame& shadow_frame,
-                    uint32_t call_site_idx,
-                    const InstructionOperands* operands,
-                    JValue* result)
+EXPORT bool DoInvokeCustom(Thread* self,
+                           ShadowFrame& shadow_frame,
+                           uint32_t call_site_idx,
+                           const InstructionOperands* operands,
+                           JValue* result)
     REQUIRES_SHARED(Locks::mutator_lock_);
 
 // Performs a custom invoke (invoke-custom/invoke-custom-range).
@@ -307,11 +280,13 @@ ALWAYS_INLINE static JValue GetFieldValue(const ShadowFrame& shadow_frame, uint3
   return field_value;
 }
 
+LIBART_PROTECTED
 extern "C" size_t NterpGetStaticField(Thread* self,
                                       ArtMethod* caller,
                                       const uint16_t* dex_pc_ptr,
                                       size_t resolve_field_type);
 
+LIBART_PROTECTED
 extern "C" uint32_t NterpGetInstanceFieldOffset(Thread* self,
                                                 ArtMethod* caller,
                                                 const uint16_t* dex_pc_ptr,
@@ -347,230 +322,6 @@ static inline void GetFieldInfo(Thread* self,
     *is_volatile = (static_cast<int32_t>(tls_value) < 0);
     *offset = MemberOffset(std::abs(static_cast<int32_t>(tls_value)));
   }
-}
-
-// Handles iget-XXX and sget-XXX instructions.
-// Returns true on success, otherwise throws an exception and returns false.
-template<FindFieldType find_type,
-         Primitive::Type field_type,
-         bool transaction_active = false>
-ALWAYS_INLINE bool DoFieldGet(Thread* self,
-                              ShadowFrame& shadow_frame,
-                              const Instruction* inst,
-                              uint16_t inst_data) REQUIRES_SHARED(Locks::mutator_lock_) {
-  const bool is_static = (find_type == StaticObjectRead) || (find_type == StaticPrimitiveRead);
-  bool should_report = Runtime::Current()->GetInstrumentation()->HasFieldReadListeners();
-  ArtField* field = nullptr;
-  MemberOffset offset(0u);
-  bool is_volatile;
-  GetFieldInfo(self,
-               shadow_frame.GetMethod(),
-               reinterpret_cast<const uint16_t*>(inst),
-               is_static,
-               /*resolve_field_type=*/ false,
-               &field,
-               &is_volatile,
-               &offset);
-  if (self->IsExceptionPending()) {
-    return false;
-  }
-
-  ObjPtr<mirror::Object> obj;
-  if (is_static) {
-    obj = field->GetDeclaringClass();
-    if (transaction_active) {
-      if (Runtime::Current()->GetTransaction()->ReadConstraint(obj)) {
-        Runtime::Current()->AbortTransactionAndThrowAbortError(self, "Can't read static fields of "
-            + obj->PrettyTypeOf() + " since it does not belong to clinit's class.");
-        return false;
-      }
-    }
-  } else {
-    obj = shadow_frame.GetVRegReference(inst->VRegB_22c(inst_data));
-    if (should_report || obj == nullptr) {
-      field = ResolveFieldWithAccessChecks(self,
-                                           Runtime::Current()->GetClassLinker(),
-                                           inst->VRegC_22c(),
-                                           shadow_frame.GetMethod(),
-                                           /* is_static= */ false,
-                                           /* is_put= */ false,
-                                           /* resolve_field_type= */ false);
-      if (obj == nullptr) {
-        ThrowNullPointerExceptionForFieldAccess(
-            field, shadow_frame.GetMethod(), /* is_read= */ true);
-        return false;
-      }
-      // Reload in case suspension happened during field resolution.
-      obj = shadow_frame.GetVRegReference(inst->VRegB_22c(inst_data));
-    }
-  }
-
-  uint32_t vregA = is_static ? inst->VRegA_21c(inst_data) : inst->VRegA_22c(inst_data);
-  JValue result;
-  if (should_report) {
-    DCHECK(field != nullptr);
-    if (UNLIKELY(!DoFieldGetCommon<field_type>(self, shadow_frame, obj, field, &result))) {
-      // Instrumentation threw an error!
-      CHECK(self->IsExceptionPending());
-      return false;
-    }
-  }
-
-#define FIELD_GET(prim, type, jtype, vreg)                                      \
-  case Primitive::kPrim ##prim:                                                 \
-    shadow_frame.SetVReg ##vreg(vregA,                                          \
-        should_report ? result.Get ##jtype()                                    \
-                      : is_volatile ? obj->GetField ## type ## Volatile(offset) \
-                                    : obj->GetField ##type(offset));            \
-    break;
-
-  switch (field_type) {
-    FIELD_GET(Boolean, Boolean, Z, )
-    FIELD_GET(Byte, Byte, B, )
-    FIELD_GET(Char, Char, C, )
-    FIELD_GET(Short, Short, S, )
-    FIELD_GET(Int, 32, I, )
-    FIELD_GET(Long, 64, J, Long)
-#undef FIELD_GET
-    case Primitive::kPrimNot:
-      shadow_frame.SetVRegReference(
-          vregA,
-          should_report ? result.GetL()
-                        : is_volatile ? obj->GetFieldObjectVolatile<mirror::Object>(offset)
-                                      : obj->GetFieldObject<mirror::Object>(offset));
-      break;
-    default:
-      LOG(FATAL) << "Unreachable: " << field_type;
-      UNREACHABLE();
-  }
-  return true;
-}
-
-static inline bool CheckWriteConstraint(Thread* self, ObjPtr<mirror::Object> obj)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
-  Runtime* runtime = Runtime::Current();
-  if (runtime->GetTransaction()->WriteConstraint(obj)) {
-    DCHECK(runtime->GetHeap()->ObjectIsInBootImageSpace(obj) || obj->IsClass());
-    const char* base_msg = runtime->GetHeap()->ObjectIsInBootImageSpace(obj)
-        ? "Can't set fields of boot image "
-        : "Can't set fields of ";
-    runtime->AbortTransactionAndThrowAbortError(self, base_msg + obj->PrettyTypeOf());
-    return false;
-  }
-  return true;
-}
-
-static inline bool CheckWriteValueConstraint(Thread* self, ObjPtr<mirror::Object> value)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
-  Runtime* runtime = Runtime::Current();
-  if (runtime->GetTransaction()->WriteValueConstraint(value)) {
-    DCHECK(value != nullptr);
-    std::string msg = value->IsClass()
-        ? "Can't store reference to class " + value->AsClass()->PrettyDescriptor()
-        : "Can't store reference to instance of " + value->GetClass()->PrettyDescriptor();
-    runtime->AbortTransactionAndThrowAbortError(self, msg);
-    return false;
-  }
-  return true;
-}
-
-// Handles iput-XXX and sput-XXX instructions.
-// Returns true on success, otherwise throws an exception and returns false.
-template<FindFieldType find_type, Primitive::Type field_type, bool transaction_active>
-ALWAYS_INLINE bool DoFieldPut(Thread* self,
-                              const ShadowFrame& shadow_frame,
-                              const Instruction* inst,
-                              uint16_t inst_data)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
-  bool should_report = Runtime::Current()->GetInstrumentation()->HasFieldWriteListeners();
-  bool is_static = (find_type == StaticObjectWrite) || (find_type == StaticPrimitiveWrite);
-  uint32_t vregA = is_static ? inst->VRegA_21c(inst_data) : inst->VRegA_22c(inst_data);
-  bool resolve_field_type = (shadow_frame.GetVRegReference(vregA) != nullptr);
-  ArtField* field = nullptr;
-  MemberOffset offset(0u);
-  bool is_volatile;
-  GetFieldInfo(self,
-               shadow_frame.GetMethod(),
-               reinterpret_cast<const uint16_t*>(inst),
-               is_static,
-               resolve_field_type,
-               &field,
-               &is_volatile,
-               &offset);
-  if (self->IsExceptionPending()) {
-    return false;
-  }
-
-  ObjPtr<mirror::Object> obj;
-  if (is_static) {
-    obj = field->GetDeclaringClass();
-  } else {
-    obj = shadow_frame.GetVRegReference(inst->VRegB_22c(inst_data));
-    if (should_report || obj == nullptr) {
-      field = ResolveFieldWithAccessChecks(self,
-                                           Runtime::Current()->GetClassLinker(),
-                                           inst->VRegC_22c(),
-                                           shadow_frame.GetMethod(),
-                                           /* is_static= */ false,
-                                           /* is_put= */ true,
-                                           resolve_field_type);
-      if (UNLIKELY(obj == nullptr)) {
-        ThrowNullPointerExceptionForFieldAccess(
-            field, shadow_frame.GetMethod(), /* is_read= */ false);
-        return false;
-      }
-      // Reload in case suspension happened during field resolution.
-      obj = shadow_frame.GetVRegReference(inst->VRegB_22c(inst_data));
-    }
-  }
-  if (transaction_active && !CheckWriteConstraint(self, obj)) {
-    return false;
-  }
-
-  JValue value = GetFieldValue<field_type>(shadow_frame, vregA);
-
-  if (transaction_active &&
-      field_type == Primitive::kPrimNot &&
-      !CheckWriteValueConstraint(self, value.GetL())) {
-    return false;
-  }
-  if (should_report) {
-    return DoFieldPutCommon<field_type, transaction_active>(self,
-                                                            shadow_frame,
-                                                            obj,
-                                                            field,
-                                                            value);
-  }
-#define FIELD_SET(prim, type, jtype) \
-  case Primitive::kPrim ## prim: \
-    if (is_volatile) { \
-      obj->SetField ## type ## Volatile<transaction_active>(offset, value.Get ## jtype()); \
-    } else { \
-      obj->SetField ## type<transaction_active>(offset, value.Get ## jtype()); \
-    } \
-    break;
-
-  switch (field_type) {
-    FIELD_SET(Boolean, Boolean, Z)
-    FIELD_SET(Byte, Byte, B)
-    FIELD_SET(Char, Char, C)
-    FIELD_SET(Short, Short, S)
-    FIELD_SET(Int, 32, I)
-    FIELD_SET(Long, 64, J)
-    FIELD_SET(Not, Object, L)
-    case Primitive::kPrimVoid: {
-      LOG(FATAL) << "Unreachable " << field_type;
-      break;
-    }
-  }
-#undef FIELD_SET
-
-  if (transaction_active) {
-    if (UNLIKELY(self->IsExceptionPending())) {
-      return false;
-    }
-  }
-  return true;
 }
 
 // Handles string resolution for const-string and const-string-jumbo instructions. Also ensures the
@@ -674,11 +425,11 @@ static inline bool DoLongRemainder(ShadowFrame& shadow_frame,
 
 // Handles filled-new-array and filled-new-array-range instructions.
 // Returns true on success, otherwise throws an exception and returns false.
-template <bool is_range, bool transaction_active>
-bool DoFilledNewArray(const Instruction* inst,
-                      const ShadowFrame& shadow_frame,
-                      Thread* self,
-                      JValue* result);
+template <bool is_range>
+EXPORT bool DoFilledNewArray(const Instruction* inst,
+                             const ShadowFrame& shadow_frame,
+                             Thread* self,
+                             JValue* result);
 
 // Handles packed-switch instruction.
 // Returns the branch offset to the next instruction to execute.
@@ -751,14 +502,14 @@ static inline int32_t DoSparseSwitch(const Instruction* inst, const ShadowFrame&
 // This function accepts a null Instrumentation* as a way to cause instrumentation events not to be
 // reported.
 // TODO We might wish to reconsider how we cause some events to be ignored.
-bool MoveToExceptionHandler(Thread* self,
-                            ShadowFrame& shadow_frame,
-                            bool skip_listeners,
-                            bool skip_throw_listener) REQUIRES_SHARED(Locks::mutator_lock_);
+EXPORT bool MoveToExceptionHandler(Thread* self,
+                                   ShadowFrame& shadow_frame,
+                                   bool skip_listeners,
+                                   bool skip_throw_listener) REQUIRES_SHARED(Locks::mutator_lock_);
 
-NO_RETURN void UnexpectedOpcode(const Instruction* inst, const ShadowFrame& shadow_frame)
-  __attribute__((cold))
-  REQUIRES_SHARED(Locks::mutator_lock_);
+NO_RETURN EXPORT void UnexpectedOpcode(const Instruction* inst, const ShadowFrame& shadow_frame)
+    COLD_ATTR
+    REQUIRES_SHARED(Locks::mutator_lock_);
 
 // Set true if you want TraceExecution invocation before each bytecode execution.
 constexpr bool kTraceExecutionEnabled = false;

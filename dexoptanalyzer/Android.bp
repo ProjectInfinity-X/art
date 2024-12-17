@@ -21,6 +21,7 @@ package {
     // to get the below license kinds:
     //   SPDX-license-identifier-Apache-2.0
     default_applicable_licenses: ["art_license"],
+    default_team: "trendy_team_art_performance",
 }
 
 cc_defaults {
@@ -83,8 +84,8 @@ art_cc_binary {
 
 art_cc_defaults {
     name: "art_dexoptanalyzer_tests_defaults",
-    shared_libs: [
-        "libunwindstack",
+    defaults: [
+        "art_libunwindstack_static_defaults", // Must be statically linked in standalone tests
     ],
     data: [
         ":art-gtest-jars-LinkageTest",

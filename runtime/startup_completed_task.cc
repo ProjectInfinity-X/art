@@ -53,11 +53,12 @@ void StartupCompletedTask::Run(Thread* self) {
     if (!runtime->IsJavaDebuggable()) {
       std::string compiler_filter;
       std::string compilation_reason;
+      std::string primary_apk_path = runtime->GetAppInfo()->GetPrimaryApkPath();
       runtime->GetAppInfo()->GetPrimaryApkOptimizationStatus(&compiler_filter, &compilation_reason);
       CompilerFilter::Filter filter;
       if (CompilerFilter::ParseCompilerFilter(compiler_filter.c_str(), &filter) &&
           !CompilerFilter::IsAotCompilationEnabled(filter) &&
-          !runtime->GetHeap()->HasAppImageSpace()) {
+          !runtime->GetHeap()->HasAppImageSpaceFor(primary_apk_path)) {
         std::string error_msg;
         if (!RuntimeImage::WriteImageToDisk(&error_msg)) {
           LOG(DEBUG) << "Could not write temporary image to disk " << error_msg;
@@ -120,7 +121,7 @@ void StartupCompletedTask::DeleteStartupDexCaches(Thread* self, bool called_by_g
 
   // If this isn't the GC calling `DeleteStartupDexCaches` and a GC may be
   // running, wait for it to be complete. We don't want it to see these dex
-  // caches.
+  // caches. Since we are runnable, a GC started after this cannot get far.
   if (!called_by_gc) {
     runtime->GetHeap()->WaitForGcToComplete(gc::kGcCauseDeletingDexCacheArrays, self);
   }

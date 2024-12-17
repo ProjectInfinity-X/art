@@ -18,8 +18,8 @@
 
 #include "art_method-inl.h"
 #include "base/casts.h"
-#include "base/enums.h"
 #include "base/logging.h"
+#include "base/pointer_size.h"
 #include "class_linker.h"
 #include "code_generator.h"
 #include "driver/compiler_options.h"
@@ -54,7 +54,7 @@ static bool BootImageAOTCanEmbedMethod(ArtMethod* method, const CompilerOptions&
   ObjPtr<mirror::Class> klass = method->GetDeclaringClass();
   DCHECK(klass != nullptr);
   const DexFile& dex_file = klass->GetDexFile();
-  return compiler_options.IsImageClass(dex_file.StringByTypeIdx(klass->GetDexTypeIndex()));
+  return compiler_options.IsImageClass(dex_file.GetTypeDescriptor(klass->GetDexTypeIndex()));
 }
 
 HInvokeStaticOrDirect::DispatchInfo HSharpening::SharpenLoadMethod(
@@ -127,7 +127,7 @@ HInvokeStaticOrDirect::DispatchInfo HSharpening::SharpenLoadMethod(
       code_ptr_location = CodePtrLocation::kCallArtMethod;
     }
   } else if (IsInBootImage(callee)) {
-    // Use PC-relative access to the .data.bimg.rel.ro methods array.
+    // Use PC-relative access to the .data.img.rel.ro boot image methods array.
     method_load_kind = MethodLoadKind::kBootImageRelRo;
     code_ptr_location = CodePtrLocation::kCallArtMethod;
   } else if (!has_method_id) {
@@ -166,17 +166,17 @@ HLoadClass::LoadKind HSharpening::ComputeLoadClassKind(
   DCHECK(load_class->GetLoadKind() == HLoadClass::LoadKind::kRuntimeCall ||
          load_class->GetLoadKind() == HLoadClass::LoadKind::kReferrersClass)
       << load_class->GetLoadKind();
-  DCHECK(!load_class->IsInBootImage()) << "HLoadClass should not be optimized before sharpening.";
+  DCHECK(!load_class->IsInImage()) << "HLoadClass should not be optimized before sharpening.";
   const DexFile& dex_file = load_class->GetDexFile();
   dex::TypeIndex type_index = load_class->GetTypeIndex();
   const CompilerOptions& compiler_options = codegen->GetCompilerOptions();
 
-  auto is_class_in_current_boot_image = [&]() {
-    return (compiler_options.IsBootImage() || compiler_options.IsBootImageExtension()) &&
-           compiler_options.IsImageClass(dex_file.StringByTypeIdx(type_index));
+  auto is_class_in_current_image = [&]() {
+    return compiler_options.IsGeneratingImage() &&
+           compiler_options.IsImageClass(dex_file.GetTypeDescriptor(type_index));
   };
 
-  bool is_in_boot_image = false;
+  bool is_in_image = false;
   HLoadClass::LoadKind desired_load_kind = HLoadClass::LoadKind::kInvalid;
 
   if (load_class->GetLoadKind() == HLoadClass::LoadKind::kReferrersClass) {
@@ -187,7 +187,7 @@ HLoadClass::LoadKind HSharpening::ComputeLoadClassKind(
     // for using the ArtMethod* should be considered.
     desired_load_kind = HLoadClass::LoadKind::kReferrersClass;
     // Determine whether the referrer's class is in the boot image.
-    is_in_boot_image = is_class_in_current_boot_image();
+    is_in_image = is_class_in_current_image();
   } else if (load_class->NeedsAccessCheck()) {
     DCHECK_EQ(load_class->GetLoadKind(), HLoadClass::LoadKind::kRuntimeCall);
     if (klass != nullptr) {
@@ -195,8 +195,8 @@ HLoadClass::LoadKind HSharpening::ComputeLoadClassKind(
       // and the access check is bound to fail. Just emit the runtime call.
       desired_load_kind = HLoadClass::LoadKind::kRuntimeCall;
       // Determine whether the class is in the boot image.
-      is_in_boot_image = Runtime::Current()->GetHeap()->ObjectIsInBootImageSpace(klass.Get()) ||
-                         is_class_in_current_boot_image();
+      is_in_image = Runtime::Current()->GetHeap()->ObjectIsInBootImageSpace(klass.Get()) ||
+                    is_class_in_current_image();
     } else if (compiler_options.IsJitCompiler()) {
       // Unresolved class while JITting means that either we never hit this
       // instruction or it failed. Either way, just emit the runtime call.
@@ -210,12 +210,12 @@ HLoadClass::LoadKind HSharpening::ComputeLoadClassKind(
         const char* slash_pos = strrchr(descriptor, '/');
         return (slash_pos != nullptr) ? static_cast<size_t>(slash_pos - descriptor) : 0u;
       };
-      const char* klass_descriptor = dex_file.StringByTypeIdx(type_index);
+      const char* klass_descriptor = dex_file.GetTypeDescriptor(type_index);
       const uint32_t klass_package_length = package_length(klass_descriptor);
       const DexFile* referrer_dex_file = dex_compilation_unit.GetDexFile();
       const dex::TypeIndex referrer_type_index =
           referrer_dex_file->GetClassDef(dex_compilation_unit.GetClassDefIndex()).class_idx_;
-      const char* referrer_descriptor = referrer_dex_file->StringByTypeIdx(referrer_type_index);
+      const char* referrer_descriptor = referrer_dex_file->GetTypeDescriptor(referrer_type_index);
       const uint32_t referrer_package_length = package_length(referrer_descriptor);
       bool same_package =
           (referrer_package_length == klass_package_length) &&
@@ -233,26 +233,25 @@ HLoadClass::LoadKind HSharpening::ComputeLoadClassKind(
         // Test configuration, do not sharpen.
         desired_load_kind = HLoadClass::LoadKind::kRuntimeCall;
         // Determine whether the class is in the boot image.
-        is_in_boot_image = Runtime::Current()->GetHeap()->ObjectIsInBootImageSpace(klass.Get()) ||
-                           is_class_in_current_boot_image();
+        is_in_image = Runtime::Current()->GetHeap()->ObjectIsInBootImageSpace(klass.Get()) ||
+                      is_class_in_current_image();
       } else if (klass != nullptr && runtime->GetHeap()->ObjectIsInBootImageSpace(klass.Get())) {
         DCHECK(compiler_options.IsBootImageExtension());
-        is_in_boot_image = true;
+        is_in_image = true;
         desired_load_kind = HLoadClass::LoadKind::kBootImageRelRo;
       } else if ((klass != nullptr) &&
-                 compiler_options.IsImageClass(dex_file.StringByTypeIdx(type_index))) {
-        is_in_boot_image = true;
+                 compiler_options.IsImageClass(dex_file.GetTypeDescriptor(type_index))) {
+        is_in_image = true;
         desired_load_kind = HLoadClass::LoadKind::kBootImageLinkTimePcRelative;
       } else {
         // Not a boot image class.
         desired_load_kind = HLoadClass::LoadKind::kBssEntry;
       }
     } else {
-      is_in_boot_image = (klass != nullptr) &&
-          runtime->GetHeap()->ObjectIsInBootImageSpace(klass.Get());
+      is_in_image = (klass != nullptr) && runtime->GetHeap()->ObjectIsInBootImageSpace(klass.Get());
       if (compiler_options.IsJitCompiler()) {
         DCHECK(!compiler_options.GetCompilePic());
-        if (is_in_boot_image) {
+        if (is_in_image) {
           desired_load_kind = HLoadClass::LoadKind::kJitBootImageAddress;
         } else if (klass != nullptr) {
           if (runtime->GetJit()->CanEncodeClass(
@@ -272,19 +271,23 @@ HLoadClass::LoadKind HSharpening::ComputeLoadClassKind(
           // TODO(ngeoffray): Generate HDeoptimize instead.
           desired_load_kind = HLoadClass::LoadKind::kRuntimeCall;
         }
-      } else if (is_in_boot_image) {
+      } else if (is_in_image) {
         // AOT app compilation, boot image class.
         desired_load_kind = HLoadClass::LoadKind::kBootImageRelRo;
+      } else if (compiler_options.IsAppImage() && is_class_in_current_image()) {
+        // AOT app compilation, app image class.
+        is_in_image = true;
+        desired_load_kind = HLoadClass::LoadKind::kAppImageRelRo;
       } else {
-        // Not JIT and the klass is not in boot image.
+        // Not JIT and the klass is not in boot image or app image.
         desired_load_kind = HLoadClass::LoadKind::kBssEntry;
       }
     }
   }
   DCHECK_NE(desired_load_kind, HLoadClass::LoadKind::kInvalid);
 
-  if (is_in_boot_image) {
-    load_class->MarkInBootImage();
+  if (is_in_image) {
+    load_class->MarkInImage();
   }
   HLoadClass::LoadKind load_kind = codegen->GetSupportedLoadClassKind(desired_load_kind);
 
@@ -317,7 +320,7 @@ static inline bool CanUseTypeCheckBitstring(ObjPtr<mirror::Class> klass, CodeGen
   if (compiler_options.IsJitCompiler()) {
     // If we're JITting, try to assign a type check bitstring (fall through).
   } else if (codegen->GetCompilerOptions().IsBootImage()) {
-    const char* descriptor = klass->GetDexFile().StringByTypeIdx(klass->GetDexTypeIndex());
+    const char* descriptor = klass->GetDexFile().GetTypeDescriptor(klass->GetDexTypeIndex());
     if (!codegen->GetCompilerOptions().IsImageClass(descriptor)) {
       return false;
     }
@@ -466,6 +469,47 @@ void HSharpening::ProcessLoadString(
 
   HLoadString::LoadKind load_kind = codegen->GetSupportedLoadStringKind(desired_load_kind);
   load_string->SetLoadKind(load_kind);
+}
+
+void HSharpening::ProcessLoadMethodType(
+    HLoadMethodType* load_method_type,
+    CodeGenerator* codegen,
+    const DexCompilationUnit& dex_compilation_unit,
+    VariableSizedHandleScope* handles) {
+  const CompilerOptions& compiler_options = codegen->GetCompilerOptions();
+
+  HLoadMethodType::LoadKind desired_load_kind = static_cast<HLoadMethodType::LoadKind>(-1);
+
+  if (compiler_options.IsJitCompiler()) {
+    DCHECK(!compiler_options.GetCompilePic());
+    Runtime* runtime = Runtime::Current();
+    ClassLinker* class_linker = runtime->GetClassLinker();
+    ScopedObjectAccess soa(Thread::Current());
+    ObjPtr<mirror::MethodType> method_type =
+        class_linker->ResolveMethodType(Thread::Current(),
+                                        load_method_type->GetProtoIndex(),
+                                        dex_compilation_unit.GetDexCache(),
+                                        dex_compilation_unit.GetClassLoader());
+
+    if (method_type != nullptr) {
+      load_method_type->SetMethodType(handles->NewHandle(method_type));
+      desired_load_kind = HLoadMethodType::LoadKind::kJitTableAddress;
+    } else {
+      DCHECK_EQ(load_method_type->GetLoadKind(), HLoadMethodType::LoadKind::kRuntimeCall);
+      desired_load_kind = HLoadMethodType::LoadKind::kRuntimeCall;
+      Thread::Current()->ClearException();
+    }
+  } else {
+    if (compiler_options.GetCompilePic()) {
+      desired_load_kind = HLoadMethodType::LoadKind::kBssEntry;
+    } else {
+      // Test configuration, do not sharpen.
+      desired_load_kind = HLoadMethodType::LoadKind::kRuntimeCall;
+    }
+  }
+
+  DCHECK_NE(desired_load_kind, static_cast<HLoadMethodType::LoadKind>(-1));
+  load_method_type->SetLoadKind(desired_load_kind);
 }
 
 }  // namespace art

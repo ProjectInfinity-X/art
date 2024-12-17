@@ -23,9 +23,9 @@
 #include "arch/context.h"
 #include "art_method-inl.h"
 #include "base/array_ref.h"
-#include "base/enums.h"
 #include "base/globals.h"
 #include "base/logging.h"  // For VLOG_IS_ON.
+#include "base/pointer_size.h"
 #include "base/systrace.h"
 #include "dex/dex_file_types.h"
 #include "dex/dex_instruction.h"
@@ -52,7 +52,7 @@ static constexpr size_t kInvalidFrameDepth = 0xffffffff;
 
 QuickExceptionHandler::QuickExceptionHandler(Thread* self, bool is_deoptimization)
     : self_(self),
-      context_(self->GetLongJumpContext()),
+      context_(Context::Create()),
       is_deoptimization_(is_deoptimization),
       handler_quick_frame_(nullptr),
       handler_quick_frame_pc_(0),
@@ -200,7 +200,7 @@ void QuickExceptionHandler::FindCatch(ObjPtr<mirror::Throwable> exception,
 
     // Walk the stack to find catch handler.
     CatchBlockStackVisitor visitor(self_,
-                                   context_,
+                                   context_.get(),
                                    &exception_ref,
                                    this,
                                    /*skip_frames=*/already_popped,
@@ -439,19 +439,41 @@ class DeoptimizeStackVisitor final : public StackVisitor {
     ArtMethod* method = GetMethod();
     VLOG(deopt) << "Deoptimizing stack: depth: " << GetFrameDepth()
                 << " at method " << ArtMethod::PrettyMethod(method);
+
     if (method == nullptr || single_frame_done_) {
       FinishStackWalk();
       return false;  // End stack walk.
-    } else if (method->IsRuntimeMethod()) {
+    }
+
+    // Update if method exit event needs to be reported. We should report exit event only if we
+    // have reported an entry event. So tell interpreter if/ an entry event was reported.
+    bool supports_exit_events = Runtime::Current()->GetInstrumentation()->MethodSupportsExitEvents(
+        method, GetCurrentOatQuickMethodHeader());
+
+    if (method->IsRuntimeMethod()) {
       // Ignore callee save method.
       DCHECK(method->IsCalleeSaveMethod());
       return true;
     } else if (method->IsNative()) {
       // If we return from JNI with a pending exception and want to deoptimize, we need to skip
       // the native method. The top method is a runtime method, the native method comes next.
-      // We also deoptimize due to method instrumentation reasons from method entry / exit
-      // callbacks. In these cases native method is at the top of stack.
+      // We also deoptimize due to method instrumentation reasons from method exit callbacks.
+      // In these cases native method is at the top of stack.
       CHECK((GetFrameDepth() == 1U) || (GetFrameDepth() == 0U));
+      // We see a native frame when:
+      // 1. returning from JNI with a pending exception
+      // 2. deopting from method exit callbacks (with or without a pending exception).
+      // skip_method_exit_callbacks_ is set in this case
+      // 3. handling async exception on suspend points for fast native methods.
+      // We only need to call method unwind event in the first case.
+      if (supports_exit_events &&
+          !skip_method_exit_callbacks_ &&
+          GetThread()->IsExceptionPending()) {
+        // An exception has occurred in a native method and we are deoptimizing past the native
+        // method. So report method unwind event here.
+        Runtime::Current()->GetInstrumentation()->MethodUnwindEvent(
+            GetThread(), method, dex::kDexNoIndex);
+      }
       callee_method_ = method;
       return true;
     } else if (!single_frame_deopt_ &&
@@ -482,11 +504,6 @@ class DeoptimizeStackVisitor final : public StackVisitor {
       } else {
         HandleOptimizingDeoptimization(method, new_frame, updated_vregs);
       }
-      // Update if method exit event needs to be reported. We should report exit event only if we
-      // have reported an entry event. So tell interpreter if/ an entry event was reported.
-      bool supports_exit_events =
-          Runtime::Current()->GetInstrumentation()->MethodSupportsExitEvents(
-              method, GetCurrentOatQuickMethodHeader());
       new_frame->SetSkipMethodExitEvents(!supports_exit_events);
       // If we are deoptimizing after method exit callback we shouldn't call the method exit
       // callbacks again for the top frame. We may have to deopt after the callback if the callback
@@ -692,7 +709,7 @@ void QuickExceptionHandler::DeoptimizeStack(bool skip_method_exit_callbacks) {
     self_->DumpStack(LOG_STREAM(INFO) << "Deoptimizing: ");
   }
 
-  DeoptimizeStackVisitor visitor(self_, context_, this, false, skip_method_exit_callbacks);
+  DeoptimizeStackVisitor visitor(self_, context_.get(), this, false, skip_method_exit_callbacks);
   visitor.WalkStack(true);
   PrepareForLongJumpToInvokeStubOrInterpreterBridge();
 }
@@ -703,7 +720,7 @@ void QuickExceptionHandler::DeoptimizeSingleFrame(DeoptimizationKind kind) {
   // This deopt is requested while still executing the method. We haven't run method exit callbacks
   // yet, so don't skip them.
   DeoptimizeStackVisitor visitor(
-      self_, context_, this, true, /* skip_method_exit_callbacks= */ false);
+      self_, context_.get(), this, true, /* skip_method_exit_callbacks= */ false);
   visitor.WalkStack(true);
 
   // Compiled code made an explicit deoptimization.
@@ -789,9 +806,8 @@ void QuickExceptionHandler::DeoptimizePartialFragmentFixup() {
   }
 }
 
-void QuickExceptionHandler::DoLongJump(bool smash_caller_saves) {
-  // Place context back on thread so it will be available when we continue.
-  self_->ReleaseLongJumpContext(context_);
+std::unique_ptr<Context> QuickExceptionHandler::PrepareLongJump(bool smash_caller_saves) {
+  // Prepare and return the context.
   context_->SetSP(reinterpret_cast<uintptr_t>(handler_quick_frame_));
   CHECK_NE(handler_quick_frame_pc_, 0u);
   context_->SetPC(handler_quick_frame_pc_);
@@ -810,8 +826,7 @@ void QuickExceptionHandler::DoLongJump(bool smash_caller_saves) {
   }
   // Clear the dex_pc list so as not to leak memory.
   handler_dex_pc_list_.reset();
-  context_->DoLongJump();
-  UNREACHABLE();
+  return std::move(context_);
 }
 
 void QuickExceptionHandler::DumpFramesWithType(Thread* self, bool details) {

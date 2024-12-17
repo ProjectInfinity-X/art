@@ -280,7 +280,7 @@ void Addr2line(const std::string& addr2line,
                std::unique_ptr<Addr2linePipe>* pipe /* inout */) {
   DCHECK(pipe != nullptr);
 
-  if (map_src == "[vdso]" || android::base::EndsWith(map_src, ".vdex")) {
+  if (map_src == "[vdso]" || map_src.ends_with(".vdex")) {
     // addr2line will not work on the vdso.
     // vdex files are special frames injected for the interpreter
     // so they don't have any line number information available.
@@ -403,8 +403,6 @@ void DumpABI(pid_t forked_pid) {
       case ABI::kX86_64:
         to_print = ABI::kX86_64;
         break;
-      default:
-        __builtin_unreachable();
     }
   } else {
     // Check the length of the data. Assume that it's the same arch as the tool.
@@ -420,8 +418,6 @@ void DumpABI(pid_t forked_pid) {
       case ABI::kX86_64:
         to_print = io_vec.iov_len == 17 * sizeof(uint32_t) ? ABI::kX86 : ABI::kX86_64;
         break;
-      default:
-        __builtin_unreachable();
     }
   }
   std::string abi_str;

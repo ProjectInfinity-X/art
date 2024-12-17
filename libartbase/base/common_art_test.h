@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "android-base/logging.h"
+#include "android-base/properties.h"
 #include "android-base/scopeguard.h"
 #include "base/file_utils.h"
 #include "base/globals.h"
@@ -237,6 +238,12 @@ class CommonArtTestImpl {
   // Returns ${ANDROID_HOST_OUT}.
   static std::string GetAndroidHostOut();
 
+  // Returns the path where boot classpath and boot image files are installed
+  // for host tests (by the art_common mk module, typically built through "m
+  // art-host-tests"). Different in CI where they are unpacked from the
+  // art-host-tests.zip file.
+  static std::string GetHostBootClasspathInstallRoot();
+
   // File location to boot.art, e.g. /apex/com.android.art/javalib/boot.art
   static std::string GetCoreArtLocation();
 
@@ -337,6 +344,12 @@ std::vector<pid_t> GetPidByName(const std::string& process_name);
 #define TEST_DISABLED_FOR_MEMORY_TOOL_WITH_HEAP_POISONING()                       \
   if (kRunningOnMemoryTool && kPoisonHeapReferences) {                            \
     GTEST_SKIP() << "WARNING: TEST DISABLED FOR MEMORY TOOL WITH HEAP POISONING"; \
+  }
+
+#define TEST_DISABLED_FOR_USER_BUILD()                                          \
+  if (std::string build_type = android::base::GetProperty("ro.build.type", ""); \
+      kIsTargetBuild && build_type != "userdebug" && build_type != "eng") {     \
+    GTEST_SKIP() << "WARNING: TEST DISABLED FOR USER BUILD";                    \
   }
 
 #endif  // ART_LIBARTBASE_BASE_COMMON_ART_TEST_H_

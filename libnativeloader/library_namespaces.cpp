@@ -85,6 +85,9 @@ constexpr const char* kProductLibPath = "/product/" LIB ":/system/product/" LIB;
 
 const std::regex kVendorPathRegex("(/system)?/vendor/.*");
 const std::regex kProductPathRegex("(/system)?/product/.*");
+const std::regex kSystemPathRegex("/system(_ext)?/.*");  // MUST be tested last.
+const std::regex kPartitionNativeLibPathRegex(
+    "/(system|(system/)?(system_ext|vendor|product))/lib(64)?/.*");
 
 jobject GetParentClassLoader(JNIEnv* env, jobject class_loader) {
   jclass class_loader_class = env->FindClass("java/lang/ClassLoader");
@@ -103,11 +106,15 @@ ApiDomain GetApiDomainFromPath(const std::string_view path) {
   if (is_product_treblelized() && std::regex_match(path.begin(), path.end(), kProductPathRegex)) {
     return API_DOMAIN_PRODUCT;
   }
+  if (std::regex_match(path.begin(), path.end(), kSystemPathRegex)) {
+    return API_DOMAIN_SYSTEM;
+  }
   return API_DOMAIN_DEFAULT;
 }
 
 // Returns the API domain for a ':'-separated list of paths, or an error if they
-// match more than one.
+// match more than one. This function does not recognize API_DOMAIN_SYSTEM and
+// will return API_DOMAIN_DEFAULT instead.
 Result<ApiDomain> GetApiDomainFromPathList(const std::string& path_list) {
   ApiDomain result = API_DOMAIN_DEFAULT;
   size_t start_pos = 0;
@@ -115,13 +122,13 @@ Result<ApiDomain> GetApiDomainFromPathList(const std::string& path_list) {
     size_t end_pos = path_list.find(':', start_pos);
     ApiDomain api_domain =
         GetApiDomainFromPath(std::string_view(path_list).substr(start_pos, end_pos));
-    // Allow mixing API_DOMAIN_DEFAULT with any other domain. That's a bit lax,
-    // since the default e.g. includes /data, which strictly speaking is a
-    // separate domain. However, we keep it this way to not risk compat issues
-    // until we actually need all domains.
-    if (api_domain != API_DOMAIN_DEFAULT) {
-      if (result != API_DOMAIN_DEFAULT && result != api_domain) {
-        return Error() << "Path list crosses partition boundaries: " << path_list;
+    if (api_domain == API_DOMAIN_VENDOR || api_domain == API_DOMAIN_PRODUCT) {
+      if ((result == API_DOMAIN_VENDOR || result == API_DOMAIN_PRODUCT) && result != api_domain) {
+        // Fail only if the path list has both vendor and product paths. Allow
+        // combinations of either with API_DOMAIN_SYSTEM and API_DOMAIN_DEFAULT,
+        // because the path list we get here may contain shared Java system
+        // libraries and app APKs which may be in /data.
+        return Error() << "Path list crosses vendor/product partition boundaries: " << path_list;
       }
       result = api_domain;
     }
@@ -131,6 +138,12 @@ Result<ApiDomain> GetApiDomainFromPathList(const std::string& path_list) {
     start_pos = end_pos + 1;
   }
   return result;
+}
+
+// Returns true if the given path is in a partition-wide native library location,
+// i.e. <partition root>/lib(64).
+bool IsPartitionNativeLibPath(const std::string& path) {
+  return std::regex_match(path, kPartitionNativeLibPathRegex);
 }
 
 void LibraryNamespaces::Initialize() {
@@ -478,7 +491,7 @@ std::optional<std::string> FindApexNamespaceName(const std::string& location) {
   // /apex/modulename/...
   //
   // And we extract from it 'modulename', and then apply mangling rule to get namespace name for it.
-  if (android::base::StartsWith(location, kApexPath)) {
+  if (location.starts_with(kApexPath)) {
     size_t start_index = strlen(kApexPath);
     size_t slash_index = location.find_first_of('/', start_index);
     LOG_ALWAYS_FATAL_IF((slash_index == std::string::npos),

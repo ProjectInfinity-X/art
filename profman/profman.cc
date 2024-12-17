@@ -42,7 +42,6 @@
 #include "base/mem_map.h"
 #include "base/scoped_flock.h"
 #include "base/stl_util.h"
-#include "base/string_view_cpp20.h"
 #include "base/time_utils.h"
 #include "base/unix_file/fd_file.h"
 #include "base/utils.h"
@@ -64,6 +63,7 @@
 #include "profile/profile_compilation_info.h"
 #include "profile_assistant.h"
 #include "profman/profman_result.h"
+#include "inline_cache_format_util.h"
 
 namespace art {
 
@@ -210,14 +210,9 @@ static constexpr uint16_t kDefaultTestProfileClassPercentage = 5;
 
 // Separators used when parsing human friendly representation of profiles.
 static const std::string kMethodSep = "->";  // NOLINT [runtime/string] [4]
-static const std::string kMissingTypesMarker = "missing_types";  // NOLINT [runtime/string] [4]
-static const std::string kMegamorphicTypesMarker = "megamorphic_types";  // NOLINT [runtime/string] [4]
 static const std::string kClassAllMethods = "*";  // NOLINT [runtime/string] [4]
 static constexpr char kAnnotationStart = '{';
 static constexpr char kAnnotationEnd = '}';
-static constexpr char kProfileParsingInlineChacheSep = '+';
-static constexpr char kProfileParsingInlineChacheTargetSep = ']';
-static constexpr char kProfileParsingTypeSep = ',';
 static constexpr char kProfileParsingFirstCharInSignature = '(';
 static constexpr char kMethodFlagStringHot = 'H';
 static constexpr char kMethodFlagStringStartup = 'S';
@@ -260,20 +255,21 @@ static void ParseUintOption(const char* raw_option,
                             T* out,
                             T min = std::numeric_limits<T>::min(),
                             T max = std::numeric_limits<T>::max()) {
-  DCHECK(EndsWith(option_prefix, "="));
-  DCHECK(StartsWith(raw_option, option_prefix)) << raw_option << " " << option_prefix;
+  DCHECK(option_prefix.ends_with("="));
+  DCHECK(std::string_view(raw_option).starts_with(option_prefix))
+      << raw_option << " " << option_prefix;
   std::string option_name(option_prefix.substr(option_prefix.size() - 1u));
   const char* value_string = raw_option + option_prefix.size();
 
   ParseUintValue(option_name, value_string, out, min, max);
 }
 
-static void ParseBoolOption(const char* raw_option,
+static void ParseBoolOption(std::string_view option,
                             std::string_view option_prefix,
                             bool* out) {
-  DCHECK(EndsWith(option_prefix, "="));
-  DCHECK(StartsWith(raw_option, option_prefix)) << raw_option << " " << option_prefix;
-  const char* value_string = raw_option + option_prefix.size();
+  DCHECK(option_prefix.ends_with("="));
+  DCHECK(option.starts_with(option_prefix)) << option << " " << option_prefix;
+  const std::string_view value_string = option.substr(option_prefix.size());
   android::base::ParseBoolResult result = android::base::ParseBool(value_string);
   if (result == android::base::ParseBoolResult::kError) {
     std::string option_name(option_prefix.substr(option_prefix.size() - 1u));
@@ -289,17 +285,17 @@ enum class OutputProfileType {
   kBprof,
 };
 
-static void ParseOutputProfileType(const char* raw_option,
+static void ParseOutputProfileType(std::string_view option,
                                    std::string_view option_prefix,
                                    OutputProfileType* out) {
-  DCHECK(EndsWith(option_prefix, "="));
-  DCHECK(StartsWith(raw_option, option_prefix)) << raw_option << " " << option_prefix;
-  const char* value_string = raw_option + option_prefix.size();
-  if (strcmp(value_string, "app") == 0) {
+  DCHECK(option_prefix.ends_with("="));
+  DCHECK(option.starts_with(option_prefix)) << option << " " << option_prefix;
+  const std::string_view value_string = option.substr(option_prefix.size());
+  if (value_string == "app") {
     *out = OutputProfileType::kApp;
-  } else if (strcmp(value_string, "boot") == 0) {
+  } else if (value_string == "boot") {
     *out = OutputProfileType::kBoot;
-  } else if (strcmp(value_string, "bprof") == 0) {
+  } else if (value_string == "bprof") {
     *out = OutputProfileType::kBprof;
   } else {
     std::string option_name(option_prefix.substr(option_prefix.size() - 1u));
@@ -356,39 +352,39 @@ class ProfMan final {
         dump_only_ = true;
       } else if (option == "--dump-classes-and-methods") {
         dump_classes_and_methods_ = true;
-      } else if (StartsWith(option, "--create-profile-from=")) {
+      } else if (option.starts_with("--create-profile-from=")) {
         create_profile_from_file_ = std::string(option.substr(strlen("--create-profile-from=")));
-      } else if (StartsWith(option, "--output-profile-type=")) {
-        ParseOutputProfileType(raw_option, "--output-profile-type=", &output_profile_type_);
-      } else if (StartsWith(option, "--dump-output-to-fd=")) {
+      } else if (option.starts_with("--output-profile-type=")) {
+        ParseOutputProfileType(option, "--output-profile-type=", &output_profile_type_);
+      } else if (option.starts_with("--dump-output-to-fd=")) {
         ParseUintOption(raw_option, "--dump-output-to-fd=", &dump_output_to_fd_);
       } else if (option == "--generate-boot-image-profile") {
         generate_boot_image_profile_ = true;
-      } else if (StartsWith(option, "--method-threshold=")) {
+      } else if (option.starts_with("--method-threshold=")) {
         ParseUintOption(raw_option,
                         "--method-threshold=",
                         &boot_image_options_.method_threshold,
                         0u,
                         100u);
-      } else if (StartsWith(option, "--class-threshold=")) {
+      } else if (option.starts_with("--class-threshold=")) {
         ParseUintOption(raw_option,
                         "--class-threshold=",
                         &boot_image_options_.image_class_threshold,
                         0u,
                         100u);
-      } else if (StartsWith(option, "--clean-class-threshold=")) {
+      } else if (option.starts_with("--clean-class-threshold=")) {
         ParseUintOption(raw_option,
                         "--clean-class-threshold=",
                         &boot_image_options_.image_class_clean_threshold,
                         0u,
                         100u);
-      } else if (StartsWith(option, "--preloaded-class-threshold=")) {
+      } else if (option.starts_with("--preloaded-class-threshold=")) {
         ParseUintOption(raw_option,
                         "--preloaded-class-threshold=",
                         &boot_image_options_.preloaded_class_threshold,
                         0u,
                         100u);
-      } else if (StartsWith(option, "--preloaded-classes-denylist=")) {
+      } else if (option.starts_with("--preloaded-classes-denylist=")) {
         std::string preloaded_classes_denylist =
             std::string(option.substr(strlen("--preloaded-classes-denylist=")));
         // Read the user-specified list of methods.
@@ -397,11 +393,11 @@ class ProfMan final {
                 preloaded_classes_denylist.c_str(), nullptr));  // No post-processing.
         boot_image_options_.preloaded_classes_denylist.insert(
             denylist->begin(), denylist->end());
-      } else if (StartsWith(option, "--upgrade-startup-to-hot=")) {
-        ParseBoolOption(raw_option,
+      } else if (option.starts_with("--upgrade-startup-to-hot=")) {
+        ParseBoolOption(option,
                         "--upgrade-startup-to-hot=",
                         &boot_image_options_.upgrade_startup_to_hot);
-      } else if (StartsWith(option, "--special-package=")) {
+      } else if (option.starts_with("--special-package=")) {
         std::vector<std::string> values;
         Split(std::string(option.substr(strlen("--special-package="))), ':', &values);
         if (values.size() != 2) {
@@ -410,46 +406,46 @@ class ProfMan final {
         uint32_t threshold;
         ParseUintValue("special-package", values[1], &threshold, 0u, 100u);
         boot_image_options_.special_packages_thresholds.Overwrite(values[0], threshold);
-      } else if (StartsWith(option, "--debug-append-uses=")) {
-        ParseBoolOption(raw_option,
+      } else if (option.starts_with("--debug-append-uses=")) {
+        ParseBoolOption(option,
                         "--debug-append-uses=",
                         &boot_image_options_.append_package_use_list);
-      } else if (StartsWith(option, "--out-profile-path=")) {
+      } else if (option.starts_with("--out-profile-path=")) {
         boot_profile_out_path_ = std::string(option.substr(strlen("--out-profile-path=")));
-      } else if (StartsWith(option, "--out-preloaded-classes-path=")) {
+      } else if (option.starts_with("--out-preloaded-classes-path=")) {
         preloaded_classes_out_path_ = std::string(
             option.substr(strlen("--out-preloaded-classes-path=")));
-      } else if (StartsWith(option, "--profile-file=")) {
+      } else if (option.starts_with("--profile-file=")) {
         profile_files_.push_back(std::string(option.substr(strlen("--profile-file="))));
-      } else if (StartsWith(option, "--profile-file-fd=")) {
+      } else if (option.starts_with("--profile-file-fd=")) {
         ParseFdForCollection(raw_option, "--profile-file-fd=", &profile_files_fd_);
-      } else if (StartsWith(option, "--reference-profile-file=")) {
+      } else if (option.starts_with("--reference-profile-file=")) {
         reference_profile_file_ = std::string(option.substr(strlen("--reference-profile-file=")));
-      } else if (StartsWith(option, "--reference-profile-file-fd=")) {
+      } else if (option.starts_with("--reference-profile-file-fd=")) {
         ParseUintOption(raw_option, "--reference-profile-file-fd=", &reference_profile_file_fd_);
-      } else if (StartsWith(option, "--dex-location=")) {
+      } else if (option.starts_with("--dex-location=")) {
         dex_locations_.push_back(std::string(option.substr(strlen("--dex-location="))));
-      } else if (StartsWith(option, "--apk-fd=")) {
+      } else if (option.starts_with("--apk-fd=")) {
         ParseFdForCollection(raw_option, "--apk-fd=", &apks_fd_);
-      } else if (StartsWith(option, "--apk=")) {
+      } else if (option.starts_with("--apk=")) {
         apk_files_.push_back(std::string(option.substr(strlen("--apk="))));
-      } else if (StartsWith(option, "--generate-test-profile=")) {
+      } else if (option.starts_with("--generate-test-profile=")) {
         test_profile_ = std::string(option.substr(strlen("--generate-test-profile=")));
-      } else if (StartsWith(option, "--generate-test-profile-num-dex=")) {
+      } else if (option.starts_with("--generate-test-profile-num-dex=")) {
         ParseUintOption(raw_option,
                         "--generate-test-profile-num-dex=",
                         &test_profile_num_dex_);
-      } else if (StartsWith(option, "--generate-test-profile-method-percentage=")) {
+      } else if (option.starts_with("--generate-test-profile-method-percentage=")) {
         ParseUintOption(raw_option,
                         "--generate-test-profile-method-percentage=",
                         &test_profile_method_percerntage_);
-      } else if (StartsWith(option, "--generate-test-profile-class-percentage=")) {
+      } else if (option.starts_with("--generate-test-profile-class-percentage=")) {
         ParseUintOption(raw_option,
                         "--generate-test-profile-class-percentage=",
                         &test_profile_class_percentage_);
-      } else if (StartsWith(option, "--generate-test-profile-seed=")) {
+      } else if (option.starts_with("--generate-test-profile-seed=")) {
         ParseUintOption(raw_option, "--generate-test-profile-seed=", &test_profile_seed_);
-      } else if (StartsWith(option, "--min-new-methods-percent-change=")) {
+      } else if (option.starts_with("--min-new-methods-percent-change=")) {
         uint32_t min_new_methods_percent_change;
         ParseUintOption(raw_option,
                         "--min-new-methods-percent-change=",
@@ -458,7 +454,7 @@ class ProfMan final {
                         100u);
         profile_assistant_options_.SetMinNewMethodsPercentChangeForCompilation(
             min_new_methods_percent_change);
-      } else if (StartsWith(option, "--min-new-classes-percent-change=")) {
+      } else if (option.starts_with("--min-new-classes-percent-change=")) {
         uint32_t min_new_classes_percent_change;
         ParseUintOption(raw_option,
                         "--min-new-classes-percent-change=",
@@ -566,13 +562,20 @@ class ProfMan final {
   }
 
   bool GetProfileFilterKeyFromApks(std::set<ProfileFilterKey>* profile_filter_keys) {
-    auto process_fn = [profile_filter_keys](std::unique_ptr<const DexFile>&& dex_file) {
-      // Store the profile key of the location instead of the location itself.
-      // This will make the matching in the profile filter method much easier.
-      profile_filter_keys->emplace(ProfileCompilationInfo::GetProfileDexFileBaseKey(
-          dex_file->GetLocation()), dex_file->GetLocationChecksum());
-    };
-    return OpenApkFilesFromLocations(process_fn);
+    return ForEachApkFile([&](File file, const std::string& location) {
+      ArtDexFileLoader dex_file_loader(&file, location);
+      std::vector<std::pair<std::string, uint32_t>> checksums;
+      std::string error_msg;
+      if (!dex_file_loader.GetMultiDexChecksums(&checksums, &error_msg)) {
+        LOG(ERROR) << "Open failed for '" << location << "' " << error_msg;
+        return false;
+      }
+      for (const auto& [multi_dex_location, checksum] : checksums) {
+        profile_filter_keys->emplace(
+            ProfileCompilationInfo::GetProfileDexFileBaseKey(multi_dex_location), checksum);
+      }
+      return true;
+    });
   }
 
   bool OpenApkFilesFromLocations(std::vector<std::unique_ptr<const DexFile>>* dex_files) {
@@ -584,6 +587,32 @@ class ProfMan final {
 
   bool OpenApkFilesFromLocations(
       const std::function<void(std::unique_ptr<const DexFile>&&)>& process_fn) {
+    static constexpr bool kVerifyChecksum = true;
+    std::string error_msg;
+    std::vector<std::unique_ptr<const DexFile>> dex_files_for_location;
+    bool result = ForEachApkFile([&](File file, const std::string& location) {
+      ArtDexFileLoader dex_file_loader(&file, location);
+      if (!dex_file_loader.Open(/*verify=*/false,
+                                kVerifyChecksum,
+                                /*allow_no_dex_files=*/true,
+                                &error_msg,
+                                &dex_files_for_location)) {
+        LOG(ERROR) << "Open failed for '" << location << "' " << error_msg;
+        return false;
+      }
+      return true;
+    });
+    if (!result) {
+      return false;
+    }
+    for (std::unique_ptr<const DexFile>& dex_file : dex_files_for_location) {
+      process_fn(std::move(dex_file));
+    }
+    return true;
+  }
+
+  bool ForEachApkFile(
+      const std::function<bool(File file, const std::string& location)>& process_fn) {
     bool use_apk_fd_list = !apks_fd_.empty();
     if (use_apk_fd_list) {
       // Get the APKs from the collection of FDs.
@@ -596,7 +625,7 @@ class ProfMan final {
         }
       } else {
         if (dex_locations_.size() != apks_fd_.size()) {
-            Usage("The number of apk-fds must match the number of dex-locations.");
+          Usage("The number of apk-fds must match the number of dex-locations.");
         }
       }
     } else if (!apk_files_.empty()) {
@@ -604,49 +633,29 @@ class ProfMan final {
         // If no dex locations are specified use the apk names as locations.
         dex_locations_ = apk_files_;
       } else if (dex_locations_.size() != apk_files_.size()) {
-          Usage("The number of apk-fds must match the number of dex-locations.");
+        Usage("The number of apk-fds must match the number of dex-locations.");
       }
     } else {
       // No APKs were specified.
       CHECK(dex_locations_.empty());
       return true;
     }
-    static constexpr bool kVerifyChecksum = true;
     for (size_t i = 0; i < dex_locations_.size(); ++i) {
-      std::string error_msg;
-      std::vector<std::unique_ptr<const DexFile>> dex_files_for_location;
       // We do not need to verify the apk for processing profiles.
       if (use_apk_fd_list) {
-          File file(apks_fd_[i], /*check_usage=*/false);
-          ArtDexFileLoader dex_file_loader(&file, dex_locations_[i]);
-          if (dex_file_loader.Open(/*verify=*/false,
-                                   kVerifyChecksum,
-                                   /*allow_no_dex_files=*/true,
-                                   &error_msg,
-                                   &dex_files_for_location)) {
-          } else {
-            LOG(ERROR) << "OpenZip failed for '" << dex_locations_[i] << "' " << error_msg;
-            return false;
-          }
+        File file(apks_fd_[i], /*check_usage=*/false);
+        if (!process_fn(std::move(file), dex_locations_[i])) {
+          return false;
+        }
       } else {
         File file(apk_files_[i], O_RDONLY, /*check_usage=*/false);
         if (file.Fd() < 0) {
           PLOG(ERROR) << "Unable to open '" << apk_files_[i] << "'";
           return false;
         }
-        ArtDexFileLoader dex_file_loader(&file, dex_locations_[i]);
-        if (dex_file_loader.Open(/*verify=*/false,
-                                 kVerifyChecksum,
-                                 /*allow_no_dex_files=*/true,
-                                 &error_msg,
-                                 &dex_files_for_location)) {
-        } else {
-          LOG(ERROR) << "Open failed for '" << dex_locations_[i] << "' " << error_msg;
+        if (!process_fn(std::move(file), dex_locations_[i])) {
           return false;
         }
-      }
-      for (std::unique_ptr<const DexFile>& dex_file : dex_files_for_location) {
-        process_fn(std::move(dex_file));
       }
     }
     return true;
@@ -801,81 +810,6 @@ class ProfMan final {
     return dump_only_;
   }
 
-  // Creates the inline-cache portion of a text-profile line. If the class def can't be found, or if
-  // there is no inline-caches this will be and empty string. Otherwise it will be '@' followed by
-  // an IC description matching the format described by ProcessLine below. Note that this will
-  // collapse all ICs with the same receiver type.
-  std::string GetInlineCacheLine(const ProfileCompilationInfo& profile_info,
-                                 const dex::MethodId& id,
-                                 const DexFile* dex_file,
-                                 uint16_t dex_method_idx) {
-    ProfileCompilationInfo::MethodHotness hotness =
-        profile_info.GetMethodHotness(MethodReference(dex_file, dex_method_idx));
-    DCHECK(!hotness.IsHot() || hotness.GetInlineCacheMap() != nullptr);
-    if (!hotness.IsHot() || hotness.GetInlineCacheMap()->empty()) {
-      return "";
-    }
-    const ProfileCompilationInfo::InlineCacheMap* inline_caches = hotness.GetInlineCacheMap();
-    struct IcLineInfo {
-      bool is_megamorphic_ = false;
-      bool is_missing_types_ = false;
-      std::set<dex::TypeIndex> classes_;
-    };
-    std::unordered_map<dex::TypeIndex, IcLineInfo> ics;
-    const dex::ClassDef* class_def = dex_file->FindClassDef(id.class_idx_);
-    if (class_def == nullptr) {
-      // No class def found.
-      return "";
-    }
-
-    CodeItemInstructionAccessor accessor(
-        *dex_file, dex_file->GetCodeItem(dex_file->FindCodeItemOffset(*class_def, dex_method_idx)));
-    for (const auto& [pc, ic_data] : *inline_caches) {
-      const Instruction& inst = accessor.InstructionAt(pc);
-      const dex::MethodId& target = dex_file->GetMethodId(inst.VRegB());
-      if (ic_data.classes.empty() && !ic_data.is_megamorphic && !ic_data.is_missing_types) {
-        continue;
-      }
-      auto val = ics.find(target.class_idx_);
-      if (val == ics.end()) {
-        val = ics.insert({ target.class_idx_, {} }).first;
-      }
-      if (ic_data.is_megamorphic) {
-        val->second.is_megamorphic_ = true;
-      }
-      if (ic_data.is_missing_types) {
-        val->second.is_missing_types_ = true;
-      }
-      for (dex::TypeIndex type_index : ic_data.classes) {
-        val->second.classes_.insert(type_index);
-      }
-    }
-    if (ics.empty()) {
-      return "";
-    }
-    std::ostringstream dump_ic;
-    dump_ic << kProfileParsingInlineChacheSep;
-    for (const auto& [target, dex_data] : ics) {
-      dump_ic << kProfileParsingInlineChacheTargetSep;
-      dump_ic << dex_file->GetTypeDescriptor(dex_file->GetTypeId(target));
-      if (dex_data.is_missing_types_) {
-        dump_ic << kMissingTypesMarker;
-      } else if (dex_data.is_megamorphic_) {
-        dump_ic << kMegamorphicTypesMarker;
-      } else {
-        bool first = true;
-        for (dex::TypeIndex type_index : dex_data.classes_) {
-          if (!first) {
-            dump_ic << kProfileParsingTypeSep;
-          }
-          first = false;
-          dump_ic << profile_info.GetTypeDescriptor(dex_file, type_index);
-        }
-      }
-    }
-    return dump_ic.str();
-  }
-
   bool GetClassNamesAndMethods(const ProfileCompilationInfo& profile_info,
                                std::vector<std::unique_ptr<const DexFile>>* dex_files,
                                std::set<std::string>* out_lines) {
@@ -911,8 +845,9 @@ class ProfMan final {
           if (post_startup_methods.find(dex_method_idx) != post_startup_methods.end()) {
             flags_string += kMethodFlagStringPostStartup;
           }
-          std::string inline_cache_string =
-              GetInlineCacheLine(profile_info, id, dex_file.get(), dex_method_idx);
+          FlattenProfileData::ItemMetadata metadata;
+          metadata.ExtractInlineCacheInfo(profile_info, dex_file.get(), dex_method_idx);
+          std::string inline_cache_string = GetInlineCacheLine(metadata.GetInlineCache());
           out_lines->insert(ART_FORMAT("{}{}{}{}{}{}",
                                        flags_string,
                                        type_string,
@@ -1045,7 +980,7 @@ class ProfMan final {
     while (in_stream.good()) {
       std::string dot;
       std::getline(in_stream, dot);
-      if (android::base::StartsWith(dot, "#") || dot.empty()) {
+      if (dot.starts_with("#") || dot.empty()) {
         continue;
       }
       if (process != nullptr) {
@@ -1255,7 +1190,7 @@ class ProfMan final {
       return !receiver_.has_value();
     }
 
-    const std::string_view& GetReceiverType() const {
+    std::string_view GetReceiverType() const {
       DCHECK(!IsSingleReceiver());
       return *receiver_;
     }
@@ -1322,6 +1257,10 @@ class ProfMan final {
     const dex::ClassDef* def = dex->FindClassDef(class_ref.TypeIndex());
     if (def == nullptr || method_index >= dex->NumMethodIds()) {
       // Class not in dex-file.
+      return std::nullopt;
+    }
+    if (dex->GetClassData(*def) == nullptr) {
+      // Class has no fields or methods.
       return std::nullopt;
     }
     if (LIKELY(dex->GetCodeItemOffset(*def, method_index).has_value())) {
@@ -1541,9 +1480,8 @@ class ProfMan final {
           }
         } else {
           // Get the type-ref the method code will use.
-          std::string receiver_str(segment.GetReceiverType());
-          const dex::TypeId *type_id =
-              class_ref.dex_file->FindTypeId(receiver_str.c_str());
+          std::string_view receiver_descriptor = segment.GetReceiverType();
+          const dex::TypeId *type_id = class_ref.dex_file->FindTypeId(receiver_descriptor);
           if (type_id == nullptr) {
             LOG(WARNING) << "Could not find class: "
                          << segment.GetReceiverType() << " in dex-file "

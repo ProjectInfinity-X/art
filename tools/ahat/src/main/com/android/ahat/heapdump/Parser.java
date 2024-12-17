@@ -400,7 +400,7 @@ public class Parser {
 
                   Site site = sites.get(stackSerialNumber);
                   AhatClassObj classObj = classById.get(classId);
-                  AhatClassInstance obj = new AhatClassInstance(objectId);
+                  AhatClassInstance obj = AhatClassInstance.create(classObj, objectId);
                   obj.initialize(heaps.getCurrentHeap(), site, classObj);
                   obj.setTemporaryUserData(data);
                   instances.add(obj);
@@ -582,6 +582,11 @@ public class Parser {
 
     // Sort roots and instances by id in preparation for the fixup pass.
     Instances<AhatInstance> mInstances = new Instances<AhatInstance>(instances);
+    // Ensure that no invalid classes are kept. In hprof dumps of RI it has been seen that two class
+    // objects would be stored for the same class name, but with different IDs. Only one of the IDs
+    // is present in the class dump data.
+    mInstances.removeIf(x -> x instanceof AhatClassObj && x.getTemporaryUserData() == null);
+
     roots.sort(new Comparator<RootData>() {
       @Override
       public int compare(RootData a, RootData b) {

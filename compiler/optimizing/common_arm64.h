@@ -24,9 +24,10 @@
 #include "nodes.h"
 #include "utils/arm64/assembler_arm64.h"
 
-// TODO(VIXL): Make VIXL compile with -Wshadow.
+// TODO(VIXL): Make VIXL compile cleanly with -Wshadow, -Wdeprecated-declarations.
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wshadow"
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 #include "aarch64/disasm-aarch64.h"
 #include "aarch64/macro-assembler-aarch64.h"
 #include "aarch64/simulator-aarch64.h"
@@ -349,7 +350,6 @@ inline vixl::aarch64::Shift ShiftFromOpKind(HDataProcWithShifterOp::OpKind op_ki
     default:
       LOG(FATAL) << "Unexpected op kind " << op_kind;
       UNREACHABLE();
-      return vixl::aarch64::NO_SHIFT;
   }
 }
 
@@ -364,7 +364,6 @@ inline vixl::aarch64::Extend ExtendFromOpKind(HDataProcWithShifterOp::OpKind op_
     default:
       LOG(FATAL) << "Unexpected op kind " << op_kind;
       UNREACHABLE();
-      return vixl::aarch64::NO_EXTEND;
   }
 }
 

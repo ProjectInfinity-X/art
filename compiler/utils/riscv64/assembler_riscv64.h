@@ -24,9 +24,9 @@
 
 #include "arch/riscv64/instruction_set_features_riscv64.h"
 #include "base/arena_containers.h"
-#include "base/enums.h"
 #include "base/globals.h"
 #include "base/macros.h"
+#include "base/pointer_size.h"
 #include "managed_register_riscv64.h"
 #include "utils/assembler.h"
 #include "utils/label.h"
@@ -57,7 +57,7 @@ enum class Riscv64Extension : uint32_t {
   kD,
   kZba,
   kZbb,
-  kZbs,  // TODO(riscv64): Implement "Zbs" instructions.
+  kZbs,
   kV,
   kZca,  // "C" extension instructions except floating point loads/stores.
   kZcd,  // "C" extension double loads/stores.
@@ -246,7 +246,7 @@ class Riscv64Assembler final : public Assembler {
   size_t CodeSize() const override { return Assembler::CodeSize(); }
   DebugFrameOpCodeWriterForAssembler& cfi() { return Assembler::cfi(); }
 
-  bool IsExtensionEnabled(Riscv64Extension ext) {
+  bool IsExtensionEnabled(Riscv64Extension ext) const {
     return (enabled_extensions_ & Riscv64ExtensionBit(ext)) != 0u;
   }
 
@@ -636,6 +636,16 @@ class Riscv64Assembler final : public Assembler {
   void ZbbSextB(XRegister rd, XRegister rs1);
   void ZbbSextH(XRegister rd, XRegister rs1);
   void ZbbZextH(XRegister rd, XRegister rs1);
+
+  // "Zbs" Standard Extension, opcode = 0x13, or 0x33, funct3 and funct7 varies.
+  void Bclr(XRegister rd, XRegister rs1, XRegister rs2);
+  void Bclri(XRegister rd, XRegister rs1, int32_t shamt);
+  void Bext(XRegister rd, XRegister rs1, XRegister rs2);
+  void Bexti(XRegister rd, XRegister rs1, int32_t shamt);
+  void Binv(XRegister rd, XRegister rs1, XRegister rs2);
+  void Binvi(XRegister rd, XRegister rs1, int32_t shamt);
+  void Bset(XRegister rd, XRegister rs1, XRegister rs2);
+  void Bseti(XRegister rd, XRegister rs1, int32_t shamt);
 
   ////////////////////////////// RISC-V Vector Instructions  START ///////////////////////////////
   enum class LengthMultiplier : uint32_t {
@@ -1943,7 +1953,12 @@ class Riscv64Assembler final : public Assembler {
   class Branch {
    public:
     enum Type : uint8_t {
-      // TODO(riscv64): Support 16-bit instructions ("C" Standard Extension).
+      // Compressed branches (can be promoted to longer)
+      kCondCBranch,
+      kUncondCBranch,
+      // Compressed branches (can't be promoted to longer)
+      kBareCondCBranch,
+      kBareUncondCBranch,
 
       // Short branches (can be promoted to longer).
       kCondBranch,
@@ -1954,10 +1969,13 @@ class Riscv64Assembler final : public Assembler {
       kBareUncondBranch,
       kBareCall,
 
-      // Medium branch (can be promoted to long).
+      // Medium branches (can be promoted to long).
+      // Compressed version
+      kCondCBranch21,
       kCondBranch21,
 
       // Long branches.
+      kLongCondCBranch,
       kLongCondBranch,
       kLongUncondBranch,
       kLongCall,
@@ -1975,6 +1993,8 @@ class Riscv64Assembler final : public Assembler {
 
     // Bit sizes of offsets defined as enums to minimize chance of typos.
     enum OffsetBits {
+      kOffset9 = 9,
+      kOffset12 = 12,
       kOffset13 = 13,
       kOffset21 = 21,
       kOffset32 = 32,
@@ -1996,14 +2016,16 @@ class Riscv64Assembler final : public Assembler {
     static const BranchInfo branch_info_[/* Type */];
 
     // Unconditional branch or call.
-    Branch(uint32_t location, uint32_t target, XRegister rd, bool is_bare);
+    Branch(
+        uint32_t location, uint32_t target, XRegister rd, bool is_bare, bool compression_allowed);
     // Conditional branch.
     Branch(uint32_t location,
            uint32_t target,
            BranchCondition condition,
            XRegister lhs_reg,
            XRegister rhs_reg,
-           bool is_bare);
+           bool is_bare,
+           bool compression_allowed);
     // Label address or literal.
     Branch(uint32_t location, uint32_t target, XRegister rd, Type label_or_literal_type);
     Branch(uint32_t location, uint32_t target, FRegister rd, Type literal_type);
@@ -2012,13 +2034,16 @@ class Riscv64Assembler final : public Assembler {
     // others are effectively unconditional.
     static bool IsNop(BranchCondition condition, XRegister lhs, XRegister rhs);
     static bool IsUncond(BranchCondition condition, XRegister lhs, XRegister rhs);
+    static bool IsCompressed(Type type);
 
     static BranchCondition OppositeCondition(BranchCondition cond);
 
     Type GetType() const;
+    Type GetOldType() const;
     BranchCondition GetCondition() const;
     XRegister GetLeftRegister() const;
     XRegister GetRightRegister() const;
+    XRegister GetNonZeroRegister() const;
     FRegister GetFRegister() const;
     uint32_t GetTarget() const;
     uint32_t GetLocation() const;
@@ -2029,6 +2054,11 @@ class Riscv64Assembler final : public Assembler {
     uint32_t GetOldEndLocation() const;
     bool IsBare() const;
     bool IsResolved() const;
+
+    uint32_t NextBranchId() const;
+
+    // Checks if condition meets compression requirements
+    bool IsCompressableCondition() const;
 
     // Returns the bit size of the signed offset that the branch instruction can handle.
     OffsetBits GetOffsetSize() const;
@@ -2057,11 +2087,14 @@ class Riscv64Assembler final : public Assembler {
     // Calculates and returns the offset ready for encoding in the branch instruction(s).
     int32_t GetOffset() const;
 
+    // Link with the next branch
+    void LinkToList(uint32_t next_branch_id);
+
    private:
     // Completes branch construction by determining and recording its type.
     void InitializeType(Type initial_type);
     // Helper for the above.
-    void InitShortOrLong(OffsetBits ofs_size, Type short_type, Type long_type, Type longest_type);
+    void InitShortOrLong(OffsetBits ofs_size, std::initializer_list<Type> types);
 
     uint32_t old_location_;  // Offset into assembler buffer in bytes.
     uint32_t location_;      // Offset into assembler buffer in bytes.
@@ -2075,6 +2108,13 @@ class Riscv64Assembler final : public Assembler {
 
     Type type_;      // Current type of the branch.
     Type old_type_;  // Initial type of the branch.
+
+    bool compression_allowed_;
+
+    // Id of the next branch bound to the same label in singly-linked zero-terminated list
+    // NOTE: encoded the same way as a position in a linked Label (id + sizeof(void*))
+    // Label itself is used to hold the 'head' of this list
+    uint32_t next_branch_id_;
   };
 
   // Branch and literal fixup.
@@ -2735,6 +2775,13 @@ class ScopedExtensionsRestriction : public ScopedExtensionsOverride {
 };
 
 template <Riscv64ExtensionMask kMask>
+class ScopedExtensionsInclusion : public ScopedExtensionsOverride {
+ public:
+  explicit ScopedExtensionsInclusion(Riscv64Assembler* assembler)
+      : ScopedExtensionsOverride(assembler, GetEnabledExtensions(assembler) | kMask) {}
+};
+
+template <Riscv64ExtensionMask kMask>
 using ScopedExtensionsExclusion = ScopedExtensionsRestriction<~kMask>;
 
 using ScopedLrScExtensionsRestriction =
@@ -2837,6 +2884,14 @@ class ScratchRegisterScope {
 
   DISALLOW_COPY_AND_ASSIGN(ScratchRegisterScope);
 };
+
+constexpr Riscv64ExtensionMask kRiscv64CompressedExtensionsMask =
+    Riscv64ExtensionBit(Riscv64Extension::kZca) |
+    Riscv64ExtensionBit(Riscv64Extension::kZcd) |
+    Riscv64ExtensionBit(Riscv64Extension::kZcb);
+
+using ScopedNoCInstructions = ScopedExtensionsExclusion<kRiscv64CompressedExtensionsMask>;
+using ScopedUseCInstructions = ScopedExtensionsInclusion<kRiscv64CompressedExtensionsMask>;
 
 }  // namespace riscv64
 }  // namespace art

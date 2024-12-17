@@ -18,7 +18,7 @@
 
 #include "art_method-inl.h"
 #include "base/casts.h"
-#include "base/enums.h"
+#include "base/pointer_size.h"
 #include "base/utils.h"
 #include "class-alloc-inl.h"
 #include "class-inl.h"
@@ -38,7 +38,7 @@ namespace mirror {
 
 uint32_t ClassExt::ClassSize(PointerSize pointer_size) {
   uint32_t vtable_entries = Object::kVTableLength;
-  return Class::ComputeClassSize(true, vtable_entries, 0, 0, 0, 0, 0, pointer_size);
+  return Class::ComputeClassSize(true, vtable_entries, 0, 0, 0, 0, 0, 0, pointer_size);
 }
 
 void ClassExt::SetObsoleteArrays(ObjPtr<PointerArray> methods,
